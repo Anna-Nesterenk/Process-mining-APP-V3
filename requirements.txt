@@ -1,0 +1,14 @@
+streamlit
+pandas
+openpyxl
+plotly
+graphviz
+matplotlib
+seaborn
+pillow
+networkx
+pydot
+scipy
+pm4py
+reportlab
+kaleido
