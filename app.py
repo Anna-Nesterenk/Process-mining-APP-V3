@@ -134,7 +134,7 @@ def main():
     figures["step_analysis"] = render_bubble_and_risk_section(analysis["step_analysis"])
     figures["heuristics"] = render_heuristics_section(analysis["transitions"])
     figures["variants"] = render_variant_analysis_section(analysis["variants"])
-    figures["timeline"] = render_case_timeline_section(df)
+    figures["timeline"] = render_case_timeline_section(df, analysis["step_analysis"])
 
     # ---------------- FR-9: bundle everything into one AnalysisResult --------
     result = AnalysisResult(
@@ -284,6 +284,28 @@ def render_bubble_and_risk_section(step_analysis):
     )
     st.pyplot(fig_heatmap)
 
+    with st.expander("ℹ️ Як читати Risk Heatmap"):
+        st.markdown(
+            """
+    - **Вісь X** – Average Duration (середня тривалість кроку)
+    - **Вісь Y** – Number of Reworks (середня кількість повторів кроку)
+    - **Розмір бульбашки** (на бульбашковій діаграмі вище) – Activity Frequency (частота активності)
+
+    **Інтерпретація зон:**
+
+    - 🟢 **Green zone** – низька тривалість + низький rework → Healthy process
+    - 🟡 **Yellow zone** – зростає тривалість або rework → Requires monitoring
+    - 🔴 **Red zone** – висока тривалість + високий rework → Potential bottleneck
+
+    **Типові дії (Typical actions):**
+
+    - Automate — автоматизувати крок
+    - Simplify — спростити процедуру
+    - Eliminate approval — прибрати зайві погодження
+    - Investigate root causes — дослідити першопричини
+    """
+        )
+
     return {"figures": {"bubble": fig_bubble, "heatmap": fig_heatmap}, "statistics": step_analysis}
 
 
@@ -332,14 +354,22 @@ def render_variant_analysis_section(variants):
     return {"statistics": variants}
 
 
-def render_case_timeline_section(df):
+def render_case_timeline_section(df, step_analysis=None):
     st.subheader("📅 Timeline кейсу")
     case_list = df["Case ID"].unique()
     selected_case = st.selectbox("Оберіть кейс", case_list)
 
+    top_step = step_analysis.get("top_step") if step_analysis else None
+    bottleneck_activity = top_step["Activity Name"] if top_step is not None else None
+
     case_df = df[df["Case ID"] == selected_case].sort_values("Start Timestamp")
-    fig = visualizations.case_timeline(case_df, selected_case)
+    fig = visualizations.case_timeline(case_df, selected_case, bottleneck_activity)
     st.plotly_chart(fig, use_container_width=True)
+
+    st.caption(
+        "🟢 Звичайний крок · 🔴 Rework (повторюваний крок у цьому кейсі) "
+        "або крок, визначений як основний bottleneck процесу."
+    )
 
     return {"figure": fig}
 

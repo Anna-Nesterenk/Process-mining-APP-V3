@@ -239,12 +239,24 @@ process_mining_app/
 
 ## modules/reporting.py
 
-Формує сучасний PDF Executive Report:
+Формує PDF Executive Report як **фіксований звіт на 6 сторінок**:
 
-* Cover Page (заголовок, дата формування, період аналізу, кількість кейсів);
-* KPI Summary (кейси, активності, Lead Time, тривалість кейсу);
-* Visualizations (усі релевантні графіки, вбудовані як PNG);
-* Executive Summary, рекомендації, Process Maturity Score.
+1. Cover + KPI Summary (кількість кейсів, період аналізу, середня та
+   медіанна тривалість кейсу);
+2. Case Duration Distribution (Histogram);
+3. Heuristics Miner (Custom Graphviz);
+4. Lead Time: Rework vs Non-Rework (графік + пояснення: кількість і частка
+   кейсів з rework, інтерпретація впливу на Lead Time);
+5. Bubble Chart: Duration per Step vs Rework Count (+ автоматично
+   згенерований висновок про основний bottleneck);
+6. Executive Summary, рекомендації, Process Maturity Score.
+
+Risk Heatmap свідомо **не** входить до PDF (залишається лише в інтерфейсі
+Streamlit) — див. коментар у файлі.
+
+Кожен графік у звіті будується тим самим викликом `visualizations.py`, який
+використовує UI Streamlit, з тих самих централізованих даних
+(`AnalysisResult`) — жоден розрахунок для PDF не дублюється.
 
 Шрифт для кирилиці береться напряму з пакета matplotlib (`DejaVu Sans`),
 тому PDF не залежить від локально встановлених TTF-файлів і однаково працює
