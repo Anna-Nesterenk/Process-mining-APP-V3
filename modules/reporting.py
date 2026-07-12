@@ -1,38 +1,41 @@
 """
 reporting.py
 ------------
-Builds the downloadable PDF "Executive Report".
+Builds the downloadable PDF "Executive Report" as a fixed 6-page document
+(per the Executive Report & Visualization Improvements spec, CR-01..CR-08):
 
-Redesigned per Sec. 4 of the requirements:
-    - Cover page (title, generation date, analysis period, case count)
-    - KPI summary (cases, activities, avg lead time, median/avg duration)
-    - Visualizations (every relevant chart embedded as PNG)
-    - Executive summary, recommendations, maturity score
+    Page 1: Cover + KPI Summary
+    Page 2: Case Duration Distribution (Histogram)
+    Page 3: Heuristics Miner (Custom Graphviz)
+    Page 4: Lead Time: Rework vs Non-Rework (chart + explanation)
+    Page 5: Bubble Chart: Duration per Step vs Rework Count (+ bottleneck conclusion)
+    Page 6: Executive Summary (unchanged content: summary, recommendations, maturity score)
 
-Font fix (Sec. 2.5)
---------------------
-The previous implementation looked for a `DejaVuSans.ttf` file that was
-never actually committed to the repo, so `generate_pdf_report` crashed with
-a `FileNotFoundError` as soon as it was called on Streamlit Cloud (and on
-any machine that didn't happen to have that file lying around). Cyrillic
-text also can't use ReportLab's built-in Helvetica/Times base fonts, so
-simply falling back to those isn't an option either.
+Risk Heatmap is intentionally NOT built or embedded here (CR-06) -- it stays
+a Streamlit-only visualization.
 
-Fix: matplotlib already ships a full copy of DejaVu Sans (regular + bold)
-inside its own installed package data, and matplotlib is already a hard
-dependency of this app. We resolve that bundled font via
-`matplotlib.get_data_path()` at runtime and register it with ReportLab --
-no extra font file needs to be committed to the repo, and the exact same
-font is available locally and on Streamlit Cloud since both environments
-install matplotlib from the same wheel.
+Every chart on every page is built by calling the SAME `visualizations.py`
+functions used to render the Streamlit UI (reusing `result.case_times`,
+`result.statistics`, `result.transitions`), so nothing is recalculated for
+the PDF -- it always matches what the user saw on screen.
+
+Font fix (Sec. 2.5 of the original refactor requirements)
+-----------------------------------------------------------
+Cyrillic text can't use ReportLab's built-in Helvetica/Times base fonts, and
+bundling a TTF file with the repo previously went wrong (file never
+committed -> crash on Streamlit Cloud). matplotlib already ships a full copy
+of DejaVu Sans (regular + bold) inside its own installed package data, and
+matplotlib is already a hard dependency of this app, so that bundled font is
+resolved via `matplotlib.get_data_path()` at runtime instead -- no extra
+font file needs to live in the repo.
 
 Chart embedding
 -----------------
 Plotly figures are rasterized to PNG via `fig.to_image(...)` (kaleido
-backend -- added to requirements.txt). Matplotlib figures are rasterized
-via `fig.savefig(...)`. Graphviz Digraphs are rendered via `dot.pipe(...)`;
-if the `dot` binary isn't available in a given environment, that one chart
-is skipped rather than failing the whole report.
+backend -- see requirements.txt). Matplotlib figures are rasterized via
+`fig.savefig(...)`. Graphviz Digraphs are rendered via `dot.pipe(...)`; if
+the `dot` binary isn't available in a given environment, that one chart is
+skipped rather than failing the whole report.
 """
 
 import os
@@ -110,7 +113,7 @@ def _graphviz_to_png(dot) -> Optional[bytes]:
         return None
 
 
-def _image_flowable(png_bytes: bytes, max_width_cm: float = 16) -> Optional[Image]:
+def _image_flowable(png_bytes: Optional[bytes], max_width_cm: float = 16) -> Optional[Image]:
     if not png_bytes:
         return None
     from PIL import Image as PILImage
@@ -148,50 +151,53 @@ def _build_styles() -> Dict[str, ParagraphStyle]:
             "Base", fontName=FONT_REGULAR, fontSize=10.5, leading=15,
             textColor=colors.black, spaceAfter=8,
         ),
+        "bottleneck_box": ParagraphStyle(
+            "BottleneckBox", fontName=FONT_REGULAR, fontSize=10.5, leading=15,
+            textColor=colors.HexColor("#7F1D1D"), spaceAfter=8, backColor=colors.HexColor("#FEF2F2"),
+            borderPadding=8,
+        ),
     }
 
 
 # ---------------------------------------------------------------------------
-# Section builders
+# Page 1: Cover + KPI Summary (CR-02)
 # ---------------------------------------------------------------------------
 def _build_cover_page(elements: list, styles: dict, kpis: Dict[str, Any]) -> None:
-    elements.append(Spacer(1, 4 * cm))
+    elements.append(Spacer(1, 2 * cm))
     elements.append(Paragraph("Process Mining", styles["title"]))
     elements.append(Paragraph("Executive Report", styles["title"]))
-    elements.append(Spacer(1, 1 * cm))
+    elements.append(Spacer(1, 0.6 * cm))
     elements.append(
         Paragraph(f"Дата формування: {datetime.now().strftime('%d.%m.%Y')}", styles["cover_sub"])
     )
-
-    start = kpis.get("start_period")
-    end = kpis.get("end_period")
-    if pd.notna(start) and pd.notna(end):
-        elements.append(
-            Paragraph(
-                f"Період аналізу: {start.date()} → {end.date()}", styles["cover_sub"]
-            )
-        )
-    elements.append(
-        Paragraph(f"Кількість проаналізованих кейсів: {kpis.get('num_cases', 0)}", styles["cover_sub"])
-    )
-    elements.append(Spacer(1, 2 * cm))
+    elements.append(Spacer(1, 1 * cm))
     elements.append(Paragraph(AUTHOR_NAME, styles["cover_sub"]))
     elements.append(
         Paragraph(f'<link href="{AUTHOR_LINKEDIN}">{AUTHOR_LINKEDIN}</link>', styles["cover_sub"])
     )
-    elements.append(PageBreak())
+    elements.append(Spacer(1, 1.2 * cm))
 
 
 def _build_kpi_summary(elements: list, styles: dict, kpis: Dict[str, Any]) -> None:
+    """
+    CR-02: KPI Summary now contains ONLY:
+        Number of Cases, Analysis Period, Average Case Duration, Median Case Duration
+    (Average Lead Time and Number of Activities have been removed.)
+    """
     elements.append(Paragraph("KPI Summary", styles["subtitle"]))
+
+    start = kpis.get("start_period")
+    end = kpis.get("end_period")
+    period_str = (
+        f"{start.date()} → {end.date()}" if pd.notna(start) and pd.notna(end) else "—"
+    )
 
     rows = [
         ["Показник", "Значення"],
         ["Кількість кейсів (Number of Cases)", f"{kpis.get('num_cases', 0)}"],
-        ["Кількість активностей (Number of Activities)", f"{kpis.get('num_activities', 0)}"],
-        ["Середній Lead Time (Average Lead Time)", f"{kpis.get('avg_lead_time', 0):.2f} год"],
-        ["Медіанна тривалість кейсу (Median Case Duration)", f"{kpis.get('median_case_duration', 0):.2f} год"],
+        ["Період аналізу (Analysis Period)", period_str],
         ["Середня тривалість кейсу (Average Case Duration)", f"{kpis.get('avg_case_duration', 0):.2f} год"],
+        ["Медіанна тривалість кейсу (Median Case Duration)", f"{kpis.get('median_case_duration', 0):.2f} год"],
     ]
 
     table = Table(rows, colWidths=[10.5 * cm, 5.5 * cm])
@@ -216,25 +222,135 @@ def _build_kpi_summary(elements: list, styles: dict, kpis: Dict[str, Any]) -> No
     elements.append(Spacer(1, 12))
 
 
-def _build_visualizations_section(elements: list, styles: dict, charts: Dict[str, bytes]) -> None:
-    if not any(charts.values()):
-        return
-    elements.append(PageBreak())
-    elements.append(Paragraph("Visualizations", styles["subtitle"]))
+# ---------------------------------------------------------------------------
+# Page 2: Case Duration Distribution (CR-03)
+# ---------------------------------------------------------------------------
+def _build_case_duration_page(elements: list, styles: dict, visualizations, result) -> None:
+    elements.append(Paragraph("Case Duration Distribution (Histogram)", styles["subtitle"]))
+    try:
+        fig = visualizations.case_duration_histogram(result.case_times)
+        img = _image_flowable(_plotly_to_png(fig))
+        if img is not None:
+            elements.append(img)
+        else:
+            elements.append(Paragraph("Графік недоступний для відображення.", styles["base"]))
+    except Exception:
+        elements.append(Paragraph("Графік недоступний для відображення.", styles["base"]))
 
-    for caption, png_bytes in charts.items():
-        img = _image_flowable(png_bytes)
-        if img is None:
-            continue
-        elements.append(Paragraph(caption, styles["chart_caption"]))
-        elements.append(img)
-        elements.append(Spacer(1, 10))
+
+# ---------------------------------------------------------------------------
+# Page 3: Heuristics Miner (CR-04)
+# ---------------------------------------------------------------------------
+def _build_heuristics_page(elements: list, styles: dict, visualizations, result) -> None:
+    elements.append(Paragraph("Heuristics Miner (Custom Graphviz)", styles["subtitle"]))
+    transitions = result.transitions or {}
+    try:
+        dot = visualizations.heuristics_graph(transitions["edges"], transitions["bottleneck_text"])
+        img = _image_flowable(_graphviz_to_png(dot))
+        if img is not None:
+            elements.append(img)
+        else:
+            elements.append(Paragraph("Граф переходів недоступний для відображення.", styles["base"]))
+    except Exception:
+        elements.append(Paragraph("Граф переходів недоступний для відображення.", styles["base"]))
 
 
+# ---------------------------------------------------------------------------
+# Page 4: Lead Time vs Rework (CR-05)
+# ---------------------------------------------------------------------------
+def _build_lead_time_page(elements: list, styles: dict, visualizations, result) -> None:
+    elements.append(Paragraph("Lead Time: Rework vs Non-Rework", styles["subtitle"]))
+
+    lead_time = result.statistics.get("lead_time", {})
+    rework = result.statistics.get("rework", {})
+
+    try:
+        fig = visualizations.lead_time_boxplot(lead_time["lead_time_per_case"])
+        img = _image_flowable(_matplotlib_to_png(fig), max_width_cm=13)
+        if img is not None:
+            elements.append(img)
+    except Exception:
+        elements.append(Paragraph("Графік недоступний для відображення.", styles["base"]))
+
+    elements.append(Spacer(1, 10))
+
+    total_rework_cases = rework.get("total_rework_cases", 0)
+    percent_rework = rework.get("percent_rework", 0)
+    mean_lead_rework = lead_time.get("mean_lead_rework", 0) or 0
+    mean_lead_no_rework = lead_time.get("mean_lead_no_rework", 0) or 0
+    lead_diff = mean_lead_rework - mean_lead_no_rework
+
+    explanation = (
+        f"<b>Кейсів з повторюваними кроками (rework):</b> {total_rework_cases} "
+        f"({percent_rework}% від загальної кількості кейсів).<br/><br/>"
+        f"Середній Lead Time для кейсів з rework становить {mean_lead_rework:.2f} год, "
+        f"проти {mean_lead_no_rework:.2f} год для кейсів без повторень — "
+        f"різниця {lead_diff:+.2f} год.<br/><br/>"
+    )
+    if lead_diff > 0:
+        explanation += (
+            "Це підтверджує, що повторювані кроки (rework) суттєво подовжують "
+            "виконання кейсу: чим більше повторів активностей, тим довше кейс "
+            "залишається у процесі."
+        )
+    else:
+        explanation += (
+            "У цій вибірці rework не призводить до помітного збільшення Lead Time, "
+            "однак варто продовжити моніторинг цього показника."
+        )
+
+    elements.append(Paragraph(explanation, styles["base"]))
+
+
+# ---------------------------------------------------------------------------
+# Page 5: Bubble Chart + bottleneck conclusion (CR-07)
+# ---------------------------------------------------------------------------
+def _build_bubble_chart_page(elements: list, styles: dict, visualizations, result) -> None:
+    elements.append(
+        Paragraph("Bubble Chart: Duration per Step vs Rework Count", styles["subtitle"])
+    )
+
+    step_analysis = result.statistics.get("step_analysis", {})
+
+    try:
+        fig = visualizations.step_bubble_chart(
+            step_analysis["analysis_df"], step_analysis["x_mean"], step_analysis["y_mean"]
+        )
+        img = _image_flowable(_plotly_to_png(fig))
+        if img is not None:
+            elements.append(img)
+    except Exception:
+        elements.append(Paragraph("Графік недоступний для відображення.", styles["base"]))
+
+    elements.append(Spacer(1, 10))
+
+    top_step = step_analysis.get("top_step")
+    if top_step is not None:
+        bottleneck_text = (
+            "<b>🔴 Main Potential Bottleneck</b><br/><br/>"
+            f"<b>Activity:</b> {top_step['Activity Name']}<br/>"
+            f"<b>Average Duration:</b> {top_step['avg_duration']:.2f} год<br/>"
+            f"<b>Rework Count (середня к-сть повторів):</b> {top_step['avg_count']:.2f}<br/><br/>"
+            f"<b>Recommendation:</b> крок «{top_step['Activity Name']}» перевищує середні "
+            "значення і за тривалістю, і за кількістю повторів — розгляньте його "
+            "автоматизацію, спрощення процедури або усунення зайвих погоджень."
+        )
+    else:
+        bottleneck_text = (
+            "<b>🔴 Main Potential Bottleneck</b><br/><br/>"
+            "Явно виражених bottleneck'ів (кроків, що перевищують середні значення "
+            "одночасно за тривалістю і кількістю повторів) не виявлено."
+        )
+
+    elements.append(Paragraph(bottleneck_text, styles["bottleneck_box"]))
+
+
+# ---------------------------------------------------------------------------
+# Page 6: Executive Summary (CR-08 -- unchanged content, just re-numbered)
+# ---------------------------------------------------------------------------
 def _build_executive_summary_section(
     elements: list, styles: dict, summary_text: str, recommendations: str, maturity_score: int
 ) -> None:
-    elements.append(PageBreak())
     elements.append(Paragraph("Executive Summary", styles["subtitle"]))
     elements.append(Paragraph(summary_text.replace("\n", "<br/>"), styles["base"]))
     elements.append(Spacer(1, 8))
@@ -258,11 +374,20 @@ def _build_executive_summary_section(
 # ---------------------------------------------------------------------------
 def generate_pdf_report(result) -> BytesIO:
     """
-    Build and return an in-memory PDF buffer for the executive report.
+    Build and return an in-memory PDF buffer for the 6-page executive report:
 
-    `result` is an `AnalysisResult` (modules.models.AnalysisResult), which
-    is the same object used to render the Streamlit UI -- so the PDF always
-    shows the same numbers and charts the user just saw on screen.
+        Page 1: Cover + KPI Summary
+        Page 2: Case Duration Distribution (Histogram)
+        Page 3: Heuristics Miner (Custom Graphviz)
+        Page 4: Lead Time: Rework vs Non-Rework
+        Page 5: Bubble Chart: Duration per Step vs Rework Count
+        Page 6: Executive Summary
+
+    `result` is an `AnalysisResult` (modules.models.AnalysisResult) -- the
+    same object used to render the Streamlit UI -- so every chart embedded
+    here is built by calling the exact same `visualizations.py` functions
+    the UI uses, from the exact same centralized data. No calculation is
+    ever repeated for the sake of the PDF.
     """
     from modules import visualizations  # local import avoids a hard dependency
 
@@ -276,56 +401,29 @@ def generate_pdf_report(result) -> BytesIO:
     elements: list = []
 
     kpis = result.kpis()
+
+    # ---- Page 1: Cover + KPI Summary ----
     _build_cover_page(elements, styles, kpis)
     _build_kpi_summary(elements, styles, kpis)
+    elements.append(PageBreak())
 
-    # ---- Build every chart from the centralized analysis data ----
-    stats = result.statistics
-    charts: Dict[str, bytes] = {}
+    # ---- Page 2: Case Duration Distribution ----
+    _build_case_duration_page(elements, styles, visualizations, result)
+    elements.append(PageBreak())
 
-    try:
-        fig = visualizations.case_duration_histogram(result.case_times)
-        charts["Тривалість кейсів"] = _plotly_to_png(fig)
-    except Exception:
-        pass
+    # ---- Page 3: Heuristics Miner ----
+    _build_heuristics_page(elements, styles, visualizations, result)
+    elements.append(PageBreak())
 
-    step_analysis = stats.get("step_analysis", {})
-    if step_analysis.get("analysis_df") is not None and not step_analysis["analysis_df"].empty:
-        try:
-            fig = visualizations.step_bubble_chart(
-                step_analysis["analysis_df"], step_analysis["x_mean"], step_analysis["y_mean"]
-            )
-            charts["Бульбашкова діаграма кроків"] = _plotly_to_png(fig)
-        except Exception:
-            pass
-        try:
-            fig = visualizations.risk_heatmap(
-                step_analysis["analysis_df"], step_analysis["x_mean"], step_analysis["y_mean"]
-            )
-            charts["Risk Heatmap"] = _matplotlib_to_png(fig)
-        except Exception:
-            pass
+    # ---- Page 4: Lead Time vs Rework ----
+    _build_lead_time_page(elements, styles, visualizations, result)
+    elements.append(PageBreak())
 
-    lead_time = stats.get("lead_time", {})
-    if lead_time.get("lead_time_per_case") is not None:
-        try:
-            fig = visualizations.lead_time_boxplot(lead_time["lead_time_per_case"])
-            charts["Lead Time: rework vs без rework"] = _matplotlib_to_png(fig)
-        except Exception:
-            pass
+    # ---- Page 5: Bubble Chart + bottleneck conclusion ----
+    _build_bubble_chart_page(elements, styles, visualizations, result)
+    elements.append(PageBreak())
 
-    transitions = stats.get("transitions", {})
-    if transitions.get("edges") is not None:
-        try:
-            dot = visualizations.heuristics_graph(transitions["edges"], transitions["bottleneck_text"])
-            png = _graphviz_to_png(dot)
-            if png:
-                charts["Heuristics Miner (переходи процесу)"] = png
-        except Exception:
-            pass
-
-    _build_visualizations_section(elements, styles, charts)
-
+    # ---- Page 6: Executive Summary (unchanged content) ----
     exec_summary = result.executive_summary or {}
     _build_executive_summary_section(
         elements,

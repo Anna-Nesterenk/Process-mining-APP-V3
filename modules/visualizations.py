@@ -23,7 +23,7 @@ def case_duration_histogram(case_times: pd.DataFrame):
         case_times,
         x="Duration (hours)",
         nbins=20,
-        title="Тривалість кейсів (години)"
+        title="Розподіл тривалості кейсів (години)"
     )
 
     return fig
@@ -155,11 +155,48 @@ def heuristics_graph(edges: pd.DataFrame, bottleneck_text: str) -> Digraph:
     return dot
 
 
-def case_timeline(case_df: pd.DataFrame, selected_case):
-    fig = px.scatter(
-        case_df,
-        x="Start Timestamp",
-        y="Activity Name",
+def case_timeline(case_df: pd.DataFrame, selected_case, bottleneck_activity: str = None):
+    """
+    Gantt-style timeline for a single case: each activity is drawn as a
+    horizontal bar from Start Timestamp to Finish Timestamp (instead of a
+    single point), colored green by default and red when the activity is
+    either repeated within this case (rework) or matches the globally
+    identified bottleneck activity (from the bubble-chart analysis).
+    """
+    df = case_df.sort_values("Start Timestamp").reset_index(drop=True).copy()
+
+    occurrence_counts = df["Activity Name"].value_counts()
+    is_rework = df["Activity Name"].map(occurrence_counts) > 1
+    is_bottleneck = (
+        df["Activity Name"] == bottleneck_activity if bottleneck_activity else False
+    )
+    df["highlight"] = is_rework | is_bottleneck
+    df["Категорія"] = df["highlight"].map(
+        {True: "Rework / Bottleneck", False: "Звичайний крок"}
+    )
+
+    # Distinguish repeated activities as separate bars on the y-axis.
+    df["Крок"] = [f"{i + 1}. {act}" for i, act in enumerate(df["Activity Name"])]
+
+    rename_map = {}
+    if "step_duration_hours" in df.columns:
+        rename_map["step_duration_hours"] = "Duration (год)"
+    if "waiting_hours" in df.columns:
+        rename_map["waiting_hours"] = "Waiting Time (год)"
+    df = df.rename(columns=rename_map)
+
+    hover_cols = [c for c in ["Case ID", "Activity Name", "Duration (год)", "Waiting Time (год)"] if c in df.columns]
+
+    fig = px.timeline(
+        df,
+        x_start="Start Timestamp",
+        x_end="Finish Timestamp",
+        y="Крок",
+        color="Категорія",
+        color_discrete_map={"Звичайний крок": "#2ECC71", "Rework / Bottleneck": "#E74C3C"},
+        hover_data=hover_cols,
         title=f"Timeline кейсу {selected_case}",
     )
+    fig.update_yaxes(autorange="reversed", title="Крок процесу")
+    fig.update_xaxes(title="Час")
     return fig
