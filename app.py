@@ -131,10 +131,16 @@ def main():
     render_completion_steps(analysis["start_end"])
     figures["rework"] = render_rework_section(analysis["rework"])
     figures["lead_time"] = render_lead_time_section(analysis["lead_time"])
-    figures["step_analysis"] = render_bubble_and_risk_section(analysis["step_analysis"])
+    figures["step_analysis"] = render_bubble_section(analysis["step_analysis"])
     figures["heuristics"] = render_heuristics_section(analysis["transitions"])
     figures["variants"] = render_variant_analysis_section(analysis["variants"])
     figures["timeline"] = render_case_timeline_section(df, analysis["step_analysis"])
+
+    # ---------------- CR-05 / CR-06: conditional sections ----------------
+    if analysis["role_analysis"] is not None:
+        figures["role_analysis"] = render_role_analysis_section(analysis["role_analysis"])
+    if analysis["region_analysis"] is not None:
+        figures["region_analysis"] = render_region_analysis_section(analysis["region_analysis"])
 
     # ---------------- FR-9: bundle everything into one AnalysisResult --------
     result = AnalysisResult(
@@ -148,6 +154,9 @@ def main():
         maturity_score=analysis["maturity_score"],
         ai_narrative=analysis["ai_narrative"],
         roadmap=analysis["roadmap"],
+        role_analysis=analysis["role_analysis"],
+        region_analysis=analysis["region_analysis"],
+        avg_fte_per_case=analysis["avg_fte_per_case"],
     )
 
     render_executive_summary_section(result)
@@ -239,7 +248,7 @@ def render_lead_time_section(lead_time):
     return {"figure": fig, "statistics": lead_time}
 
 
-def render_bubble_and_risk_section(step_analysis):
+def render_bubble_section(step_analysis):
     fig_bubble = visualizations.step_bubble_chart(
         step_analysis["analysis_df"], step_analysis["x_mean"], step_analysis["y_mean"]
     )
@@ -253,6 +262,8 @@ def render_bubble_and_risk_section(step_analysis):
     - **Вісь Y** – середня кількість повторів на кейс
     - **Розмір бульбашки** – сумарний вплив кроку на загальний час процесу
     - **Пунктирні лінії** – середні значення по вибірці
+    - **Підписи** – показані лише для 20% найбільш критичних активностей
+      (Impact = середня тривалість × середня к-сть повторів); решта доступні через hover
 
     📌 Інтерпретація:
     - Правий верхній квадрант → потенційні bottleneck'и
@@ -278,35 +289,7 @@ def render_bubble_and_risk_section(step_analysis):
     else:
         st.info("Явно виражених bottleneck'ів (вище середнього по тривалості і повторюваності) не виявлено.")
 
-    st.header("🔥 Risk Heatmap")
-    fig_heatmap = visualizations.risk_heatmap(
-        step_analysis["analysis_df"], step_analysis["x_mean"], step_analysis["y_mean"]
-    )
-    st.pyplot(fig_heatmap)
-
-    with st.expander("ℹ️ Як читати Risk Heatmap"):
-        st.markdown(
-            """
-    - **Вісь X** – Average Duration (середня тривалість кроку)
-    - **Вісь Y** – Number of Reworks (середня кількість повторів кроку)
-    - **Розмір бульбашки** (на бульбашковій діаграмі вище) – Activity Frequency (частота активності)
-
-    **Інтерпретація зон:**
-
-    - 🟢 **Green zone** – низька тривалість + низький rework → Healthy process
-    - 🟡 **Yellow zone** – зростає тривалість або rework → Requires monitoring
-    - 🔴 **Red zone** – висока тривалість + високий rework → Potential bottleneck
-
-    **Типові дії (Typical actions):**
-
-    - Automate — автоматизувати крок
-    - Simplify — спростити процедуру
-    - Eliminate approval — прибрати зайві погодження
-    - Investigate root causes — дослідити першопричини
-    """
-        )
-
-    return {"figures": {"bubble": fig_bubble, "heatmap": fig_heatmap}, "statistics": step_analysis}
+    return {"figure": fig_bubble, "statistics": step_analysis}
 
 
 def render_heuristics_section(transitions):
@@ -334,6 +317,17 @@ def render_heuristics_section(transitions):
     st.markdown("Як це читати (практично):")
     st.markdown("🔴 товста + червона → критичний bottleneck")
     st.markdown("🟢 товста + зелена → стабільний шлях")
+
+    with st.expander("🔍 Збільшений вигляд (zoom & scroll) для великих процесів"):
+        try:
+            svg_markup = visualizations.heuristics_graph_to_svg(dot)
+            components.html(
+                visualizations.zoomable_svg_component(svg_markup, height=600),
+                height=680,
+                scrolling=True,
+            )
+        except Exception:
+            st.info("Zoom-перегляд недоступний у цьому середовищі (відсутній graphviz 'dot').")
 
     return {"figure": dot, "statistics": transitions}
 
@@ -374,6 +368,93 @@ def render_case_timeline_section(df, step_analysis=None):
     return {"figure": fig}
 
 
+def render_role_analysis_section(role_analysis):
+    st.markdown("---")
+    st.header("👥 Process Role Analysis")
+    st.caption("Розділ показано, оскільки у файлі присутня колонка **Role**.")
+
+    st.metric("Середня кількість ролей на кейс (Average FTE per Case)", f"{role_analysis['avg_roles_per_case']:.2f}")
+
+    st.subheader("Role vs Activity Matrix")
+    fig_matrix = visualizations.role_activity_matrix(role_analysis["role_activity"])
+    st.plotly_chart(fig_matrix, use_container_width=True)
+
+    st.subheader("Role Workload Distribution")
+    fig_workload = visualizations.role_workload_chart(role_analysis["role_workload"])
+    st.plotly_chart(fig_workload, use_container_width=True)
+
+    fig_bottleneck = None
+    st.subheader("Role Bottleneck Ranking")
+    if not role_analysis["role_bottleneck_ranking"].empty:
+        fig_bottleneck = visualizations.role_bottleneck_ranking_chart(
+            role_analysis["role_bottleneck_ranking"]
+        )
+        st.plotly_chart(fig_bottleneck, use_container_width=True)
+    else:
+        st.info("Явно виражених bottleneck-активностей, пов'язаних з конкретною роллю, не виявлено.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if role_analysis["top_bottleneck_role"]:
+            st.warning(f"🚧 Роль з найбільшою участю у bottleneck-активностях: **{role_analysis['top_bottleneck_role']}**")
+    with col2:
+        if role_analysis["top_rework_role"]:
+            st.warning(f"🔁 Роль з найвищою частотою rework: **{role_analysis['top_rework_role']}**")
+
+    with st.expander("Тривалість кроків за ролями (найдовші в середньому)"):
+        st.dataframe(role_analysis["longest_duration_roles"])
+
+    return {
+        "figures": {"matrix": fig_matrix, "workload": fig_workload, "bottleneck": fig_bottleneck},
+        "statistics": role_analysis,
+    }
+
+
+def render_region_analysis_section(region_analysis):
+    st.markdown("---")
+    st.header("🌍 Regional Analysis")
+    st.caption("Розділ показано, оскільки у файлі присутня колонка **Region**.")
+
+    st.subheader("Lead Time by Region")
+    fig_lead_time = visualizations.region_lead_time_bar(region_analysis["region_lead_time"])
+    st.plotly_chart(fig_lead_time, use_container_width=True)
+
+    st.subheader("Rework by Region")
+    fig_rework = visualizations.region_rework_bar(region_analysis["region_rework"])
+    st.plotly_chart(fig_rework, use_container_width=True)
+
+    st.subheader("Regional Performance Matrix")
+    fig_matrix = visualizations.region_performance_matrix(
+        region_analysis["region_lead_time"], region_analysis["region_rework"]
+    )
+    st.plotly_chart(fig_matrix, use_container_width=True)
+
+    col1, col2 = st.columns(2)
+    if region_analysis["leader"] is not None:
+        col1.success(
+            f"🏆 Найкращий регіон: **{region_analysis['leader']['Region']}** "
+            f"(Lead Time = {region_analysis['leader']['avg_lead_time']:.2f} год)"
+        )
+    if region_analysis["outsider"] is not None:
+        col2.error(
+            f"⚠️ Регіон, що потребує уваги: **{region_analysis['outsider']['Region']}** "
+            f"(Lead Time = {region_analysis['outsider']['avg_lead_time']:.2f} год)"
+        )
+
+    st.subheader("📌 Automated Insights")
+    for insight in region_analysis["insights"]:
+        st.write(f"- {insight}")
+
+    st.subheader("💡 Recommendations")
+    for rec in region_analysis["recommendations"]:
+        st.write(f"- {rec}")
+
+    return {
+        "figures": {"lead_time": fig_lead_time, "rework": fig_rework, "matrix": fig_matrix},
+        "statistics": region_analysis,
+    }
+
+
 def render_executive_summary_section(result: AnalysisResult):
     st.markdown("---")
     st.header("🧠 Executive Summary та рекомендації")
@@ -398,11 +479,17 @@ def render_executive_summary_section(result: AnalysisResult):
 
     st.markdown("---")
     st.header("📊 KPI Scorecard")
-    col1, col2, col3, col4 = st.columns(4)
+    if kpis.get("avg_fte_per_case") is not None:
+        col1, col2, col3, col4, col5 = st.columns(5)
+    else:
+        col1, col2, col3, col4 = st.columns(4)
+        col5 = None
     col1.metric("Lead Time (avg)", f"{kpis['avg_lead_time']:.2f} h")
     col2.metric("Rework Rate", f"{result.statistics['rework']['percent_rework']}%")
     col3.metric("Variant Count", result.variants["unique_variants"])
     col4.metric("Main Variant Share", f"{result.variants['top1_share']:.1f}%")
+    if col5 is not None:
+        col5.metric("Average FTE per Case", f"{kpis['avg_fte_per_case']:.2f}")
 
     st.header("🚀 Improvement Roadmap")
     for item in result.roadmap:

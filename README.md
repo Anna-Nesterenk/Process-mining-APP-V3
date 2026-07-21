@@ -94,6 +94,7 @@ process_mining_app/
 ├── app.py
 ├── README.md
 ├── requirements.txt
+├── packages.txt          # apt packages for Streamlit Cloud (graphviz 'dot' binary)
 │
 └── modules/
     ├── analytics.py
@@ -239,24 +240,38 @@ process_mining_app/
 
 ## modules/reporting.py
 
-Формує PDF Executive Report як **фіксований звіт на 6 сторінок**:
+Формує PDF Executive Report:
 
-1. Cover + KPI Summary (кількість кейсів, період аналізу, середня та
-   медіанна тривалість кейсу);
+1. Executive Overview + KPI Summary (кількість кейсів, період аналізу,
+   середня та медіанна тривалість кейсу, і, якщо у файлі є колонка **Role**,
+   Average FTE per Case);
 2. Case Duration Distribution (Histogram);
 3. Heuristics Miner (Custom Graphviz);
 4. Lead Time: Rework vs Non-Rework (графік + пояснення: кількість і частка
    кейсів з rework, інтерпретація впливу на Lead Time);
 5. Bubble Chart: Duration per Step vs Rework Count (+ автоматично
    згенерований висновок про основний bottleneck);
-6. Executive Summary, рекомендації, Process Maturity Score.
+6. **[умовно]** Role Analysis — лише якщо у файлі є колонка **Role**;
+7. **[умовно]** Regional Analysis — лише якщо у файлі є колонка **Region**;
+8. Executive Summary, рекомендації (включно з organizational/regional
+   findings, якщо доступні), Process Maturity Score.
 
-Risk Heatmap свідомо **не** входить до PDF (залишається лише в інтерфейсі
-Streamlit) — див. коментар у файлі.
+Risk Heatmap повністю відсутній у застосунку (видалений з UI, візуалізацій
+та звіту).
 
-Кожен графік у звіті будується тим самим викликом `visualizations.py`, який
-використовує UI Streamlit, з тих самих централізованих даних
-(`AnalysisResult`) — жоден розрахунок для PDF не дублюється.
+Кожен графік у звіті береться напряму з `AnalysisResult.figures` — тих самих
+об'єктів Plotly/Matplotlib/Graphviz, які `app.py` вже один раз побудував для
+відображення в Streamlit UI. PDF не перебудовує жоден графік, а лише
+рендерить у PNG те, що вже існує (`visualizations.py` викликається лише як
+резервний варіант, якщо фігура з якоїсь причини відсутня в `figures`).
+
+**Export pipeline:** Plotly-графіки експортуються у PNG через `kaleido`
+(версія закріплена як `kaleido==0.2.1` у `requirements.txt` — новіші версії
+вимагають окремого завантаження Chrome і мовчки ламають `fig.to_image()`).
+Graphviz-граф рендериться через системний бінарник `dot`, який
+встановлюється на Streamlit Cloud через `packages.txt`. Обидва експортери
+логують причину збою (`logging`), якщо PNG все ж не вдалося згенерувати,
+замість того щоб мовчки показувати порожню сторінку.
 
 Шрифт для кирилиці береться напряму з пакета matplotlib (`DejaVu Sans`),
 тому PDF не залежить від локально встановлених TTF-файлів і однаково працює
