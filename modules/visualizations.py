@@ -11,6 +11,8 @@ case_metrics.py / analytics.py) and only reshapes/plots it -- no
 `groupby("Case ID")` or other aggregation happens in this module.
 """
 
+import math
+
 import matplotlib.pyplot as plt
 import pandas as pd
 import plotly.express as px
@@ -49,13 +51,30 @@ def lead_time_boxplot(lead_time_per_case: pd.DataFrame):
 
 
 def step_bubble_chart(analysis_df: pd.DataFrame, x_mean: float, y_mean: float):
+    """
+    CR-02: only the top 20% most critical activities (by criticality_score =
+    avg_duration * avg_count, computed once in
+    analytics.step_duration_analysis) get an on-chart text label. Every
+    bubble still shows full detail on hover -- this only declutters large
+    processes where labeling every activity makes the chart unreadable.
+    """
+    df = analysis_df.copy()
+    if "criticality_score" not in df.columns:
+        df["criticality_score"] = df["avg_duration"] * df["avg_count"]
+
+    n_top = max(1, math.ceil(len(df) * 0.2))
+    top_20_percent = set(
+        df.sort_values("criticality_score", ascending=False).head(n_top)["Activity Name"]
+    )
+    df["label"] = df["Activity Name"].where(df["Activity Name"].isin(top_20_percent), "")
+
     fig = px.scatter(
-        analysis_df,
+        df,
         x="avg_duration",
         y="avg_count",
         size="impact",
         color="impact",
-        text="Activity Name",
+        text="label",
         hover_data=["Activity Name", "avg_duration", "avg_count", "impact"],
         size_max=40,
         color_continuous_scale="RdYlGn_r",
@@ -87,20 +106,6 @@ def step_bubble_chart(analysis_df: pd.DataFrame, x_mean: float, y_mean: float):
         yaxis=dict(tickfont=dict(size=14, color="black")),
         legend_title=dict(font=dict(size=14, color="black")),
     )
-    return fig
-
-
-def risk_heatmap(analysis_df: pd.DataFrame, x_mean: float, y_mean: float):
-    risk_matrix = analysis_df.copy()
-    risk_matrix["risk_score"] = (
-        (risk_matrix["avg_duration"] / x_mean) * (risk_matrix["avg_count"] / y_mean)
-    )
-    pivot = risk_matrix.pivot_table(values="risk_score", index="Activity Name")
-
-    fig = plt.figure(figsize=(3, 4))
-    sns.heatmap(pivot, annot=True, cmap="Reds", linewidths=0.5)
-    plt.title("Risk Intensity per Activity")
-    plt.xticks([])
     return fig
 
 
@@ -155,6 +160,48 @@ def heuristics_graph(edges: pd.DataFrame, bottleneck_text: str) -> Digraph:
     return dot
 
 
+def heuristics_graph_to_svg(dot: Digraph) -> str:
+    """CR-04: render the same Digraph as SVG (vector, scales cleanly) for
+    the zoomable viewer, instead of the raster PNG used elsewhere."""
+    return dot.pipe(format="svg").decode("utf-8")
+
+
+def zoomable_svg_component(svg_markup: str, height: int = 600) -> str:
+    """
+    CR-04: wraps an SVG string in a scrollable container with simple +/- /
+    reset zoom controls (plain CSS transform + vanilla JS), so large process
+    maps can be inspected without downloading the image.
+    """
+    return f"""
+    <div style="border:1px solid #E5E7EB; border-radius:8px; overflow:auto;
+                height:{height}px; background:#ffffff; padding:4px;">
+      <div id="zoom-wrapper" style="transform-origin: 0 0; transform: scale(1);
+                  display:inline-block; padding:10px;">
+        {svg_markup}
+      </div>
+    </div>
+    <div style="margin-top:8px;">
+      <button onclick="zoomStep(0.15)">➕ Zoom In</button>
+      <button onclick="zoomStep(-0.15)">➖ Zoom Out</button>
+      <button onclick="zoomReset()">⟲ Reset</button>
+    </div>
+    <script>
+      let scale = 1;
+      function apply() {{
+        document.getElementById('zoom-wrapper').style.transform = 'scale(' + scale + ')';
+      }}
+      function zoomStep(delta) {{
+        scale = Math.max(0.2, Math.min(5, scale + delta));
+        apply();
+      }}
+      function zoomReset() {{
+        scale = 1;
+        apply();
+      }}
+    </script>
+    """
+
+
 def case_timeline(case_df: pd.DataFrame, selected_case, bottleneck_activity: str = None):
     """
     Gantt-style timeline for a single case: each activity is drawn as a
@@ -199,4 +246,94 @@ def case_timeline(case_df: pd.DataFrame, selected_case, bottleneck_activity: str
     )
     fig.update_yaxes(autorange="reversed", title="Крок процесу")
     fig.update_xaxes(title="Час")
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# CR-05: Role Analysis charts
+# ---------------------------------------------------------------------------
+def role_activity_matrix(role_activity: pd.DataFrame):
+    pivot = role_activity.pivot_table(
+        index="Role", columns="Activity Name", values="occurrences", fill_value=0
+    )
+    fig = px.imshow(
+        pivot,
+        text_auto=True,
+        aspect="auto",
+        color_continuous_scale="Blues",
+        title="Role vs Activity Matrix",
+        labels=dict(color="К-сть виконань"),
+    )
+    return fig
+
+
+def role_workload_chart(role_workload: pd.DataFrame):
+    fig = px.bar(
+        role_workload.sort_values("cases_handled", ascending=False),
+        x="Role",
+        y="cases_handled",
+        text="cases_handled",
+        title="Role Workload Distribution (кількість кейсів на роль)",
+        labels={"cases_handled": "Кількість кейсів"},
+    )
+    return fig
+
+
+def role_bottleneck_ranking_chart(role_bottleneck_ranking: pd.DataFrame):
+    if role_bottleneck_ranking.empty:
+        return None
+    fig = px.bar(
+        role_bottleneck_ranking.sort_values("occurrences", ascending=False),
+        x="Role",
+        y="occurrences",
+        text="occurrences",
+        title="Role Bottleneck Ranking",
+        labels={"occurrences": "К-сть виконань bottleneck-активностей"},
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# CR-06: Regional Analysis charts
+# ---------------------------------------------------------------------------
+def region_lead_time_bar(region_lead_time: pd.DataFrame):
+    fig = px.bar(
+        region_lead_time.sort_values("avg_lead_time"),
+        x="Region",
+        y="avg_lead_time",
+        text_auto=".2f",
+        title="Lead Time by Region",
+        labels={"avg_lead_time": "Середній Lead Time (год)"},
+    )
+    return fig
+
+
+def region_rework_bar(region_rework: pd.DataFrame):
+    fig = px.bar(
+        region_rework.sort_values("rework_rate_pct", ascending=False),
+        x="Region",
+        y="rework_rate_pct",
+        text_auto=".1f",
+        title="Rework by Region",
+        labels={"rework_rate_pct": "Частка rework (%)"},
+    )
+    return fig
+
+
+def region_performance_matrix(region_lead_time: pd.DataFrame, region_rework: pd.DataFrame):
+    merged = region_lead_time.merge(region_rework, on="Region", how="left")
+    fig = px.scatter(
+        merged,
+        x="avg_lead_time",
+        y="rework_rate_pct",
+        size="num_cases",
+        text="Region",
+        title="Regional Performance Matrix",
+        labels={
+            "avg_lead_time": "Середній Lead Time (год)",
+            "rework_rate_pct": "Частка rework (%)",
+        },
+        size_max=40,
+    )
+    fig.update_traces(textposition="top center")
     return fig

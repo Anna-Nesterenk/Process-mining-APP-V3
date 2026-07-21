@@ -14,7 +14,7 @@ visualizations displayed in the UI").
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import pandas as pd
 
@@ -44,6 +44,12 @@ class AnalysisResult:
     ai_narrative: str = ""
     roadmap: list = field(default_factory=list)
 
+    # CR-08: Optional -- None whenever the source event log doesn't contain
+    # a 'Role' / 'Region' column (CR-05 / CR-06 visibility conditions).
+    role_analysis: Optional[Dict[str, Any]] = None
+    region_analysis: Optional[Dict[str, Any]] = None
+    avg_fte_per_case: Optional[float] = None
+
     def kpis(self) -> Dict[str, Any]:
         """Convenience accessor for the handful of top-line KPIs the PDF
         cover/summary page needs, all derived from `case_times` -- the
@@ -58,4 +64,5 @@ class AnalysisResult:
             "avg_case_duration": ct["Duration (hours)"].mean(),
             "start_period": ct["Start Timestamp"].min(),
             "end_period": ct["Finish Timestamp"].max(),
+            "avg_fte_per_case": self.avg_fte_per_case,
         }

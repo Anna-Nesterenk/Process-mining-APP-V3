@@ -32,7 +32,7 @@ exposes both `Duration (hours)` and `Lead Time` (same value, two names) to
 match the vocabulary used across the rest of the app / requirements doc.
 """
 
-from typing import Dict
+from typing import Dict, Optional
 
 import pandas as pd
 
@@ -42,6 +42,8 @@ START_COL = "Start Timestamp"
 FINISH_COL = "Finish Timestamp"
 WAITING_COL = "waiting_hours"
 STEP_DURATION_COL = "step_duration_hours"
+ROLE_COL = "Role"
+REGION_COL = "Region"
 
 
 def calculate_case_times(df: pd.DataFrame) -> pd.DataFrame:
@@ -121,16 +123,121 @@ def calculate_activity_statistics(df: pd.DataFrame) -> pd.DataFrame:
     return step_stats
 
 
-def prepare_analysis_data(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+def calculate_role_statistics(df: pd.DataFrame) -> Optional[Dict[str, object]]:
+    """
+    CR-05: pure aggregation of role participation/workload -- the SSOT table
+    that `analytics.role_analysis` builds bottleneck/rework rankings from.
+
+    Returns None when the event log has no 'Role' column (CR-05 visibility
+    condition: the whole Role Analysis section is skipped in that case).
+
+    FTE approximation (no real FTE data is available in this event log):
+        - "cases_handled" per role is used as a workload proxy for FTE
+          count per role (a role that touches more distinct cases has a
+          proportionally higher effective workload).
+        - "avg_roles_per_case" (avg number of distinct roles touching a
+          case) is used as the "Average FTE per Case" KPI.
+    """
+    if ROLE_COL not in df.columns:
+        return None
+
+    role_activity = (
+        df.groupby([ROLE_COL, ACTIVITY_COL])
+        .agg(
+            occurrences=(ACTIVITY_COL, "count"),
+            avg_duration_hours=(STEP_DURATION_COL, "mean"),
+        )
+        .reset_index()
+    )
+
+    role_workload = (
+        df.groupby(ROLE_COL)
+        .agg(
+            cases_handled=(CASE_ID_COL, "nunique"),
+            activities_performed=(ACTIVITY_COL, "count"),
+            avg_step_duration_hours=(STEP_DURATION_COL, "mean"),
+        )
+        .reset_index()
+        .sort_values("cases_handled", ascending=False)
+    )
+
+    avg_roles_per_case = df.groupby(CASE_ID_COL)[ROLE_COL].nunique().mean()
+
+    return {
+        "role_activity": role_activity,
+        "role_workload": role_workload,
+        "avg_roles_per_case": avg_roles_per_case,
+    }
+
+
+def calculate_region_statistics(
+    df: pd.DataFrame, case_times: pd.DataFrame
+) -> Optional[Dict[str, object]]:
+    """
+    CR-06: pure aggregation of region-level lead time / activity data -- the
+    SSOT table that `analytics.region_analysis` builds insights/
+    recommendations from.
+
+    Returns None when the event log has no 'Region' column (CR-06
+    visibility condition).
+    """
+    if REGION_COL not in df.columns:
+        return None
+
+    # One Region per case (assumed constant within a case; first non-null wins).
+    case_region = df.groupby(CASE_ID_COL)[REGION_COL].first().reset_index()
+
+    region_case_times = case_times.merge(case_region, on=CASE_ID_COL, how="left")
+    region_lead_time = (
+        region_case_times.groupby(REGION_COL)
+        .agg(
+            avg_lead_time=("Lead Time", "mean"),
+            median_lead_time=("Lead Time", "median"),
+            num_cases=(CASE_ID_COL, "count"),
+        )
+        .reset_index()
+        .sort_values("avg_lead_time", ascending=False)
+    )
+
+    region_activity = (
+        df.groupby([REGION_COL, ACTIVITY_COL])
+        .agg(
+            occurrences=(ACTIVITY_COL, "count"),
+            avg_duration_hours=(STEP_DURATION_COL, "mean"),
+        )
+        .reset_index()
+    )
+
+    region_waiting = (
+        df.groupby(REGION_COL)[WAITING_COL].mean().reset_index(name="avg_waiting_hours")
+        if WAITING_COL in df.columns
+        else pd.DataFrame({REGION_COL: region_lead_time[REGION_COL], "avg_waiting_hours": 0.0})
+    )
+
+    return {
+        "case_region": case_region,
+        "region_lead_time": region_lead_time,
+        "region_activity": region_activity,
+        "region_waiting": region_waiting,
+    }
+
+
+def prepare_analysis_data(df: pd.DataFrame) -> Dict[str, object]:
     """
     Single entry point that performs the case-level and activity-level
     aggregations exactly once for the whole application (Sec. 5/6).
 
     All downstream analytics / visualization / reporting code must consume
     this result rather than issuing its own `groupby("Case ID")` calls.
+
+    CR-08: also computes role/region statistics once (None when the
+    respective column is absent from the source event log).
     """
+    case_times = calculate_case_times(df)
     return {
         "df": df,
-        "case_times": calculate_case_times(df),
+        "case_times": case_times,
         "activity_statistics": calculate_activity_statistics(df),
+        "role_statistics": calculate_role_statistics(df),
+        "region_statistics": calculate_region_statistics(df, case_times),
     }

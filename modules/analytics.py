@@ -24,6 +24,8 @@ CASE_ID_COL = "Case ID"
 ACTIVITY_COL = "Activity Name"
 START_COL = "Start Timestamp"
 FINISH_COL = "Finish Timestamp"
+ROLE_COL = "Role"
+REGION_COL = "Region"
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +162,12 @@ def step_duration_analysis(activity_statistics: pd.DataFrame) -> Dict[str, Any]:
         .reset_index()
     )
 
+    # CR-02: criticality score for bubble-label thresholding (Pareto 80/20).
+    # Kept as its own column rather than overwriting `impact` (which drives
+    # bubble size/color and bottleneck ranking elsewhere) to avoid changing
+    # any existing KPI/bottleneck-selection behavior.
+    analysis_df["criticality_score"] = analysis_df["avg_duration"] * analysis_df["avg_count"]
+
     x_mean = analysis_df["avg_duration"].mean()
     y_mean = analysis_df["avg_count"].mean()
 
@@ -295,6 +303,215 @@ def variant_analysis(df: pd.DataFrame, case_times: pd.DataFrame) -> Dict[str, An
 
 
 # ---------------------------------------------------------------------------
+# CR-05: Role analysis (only meaningful when the event log has a 'Role'
+# column -- role_statistics is None otherwise, and this function mirrors
+# that by returning None so the section is skipped end-to-end).
+# ---------------------------------------------------------------------------
+def role_analysis(
+    df: pd.DataFrame,
+    role_statistics: Optional[Dict[str, Any]],
+    rework: Dict[str, Any],
+    step_analysis: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if role_statistics is None:
+        return None
+
+    role_activity = role_statistics["role_activity"]
+    role_workload = role_statistics["role_workload"]
+    avg_roles_per_case = role_statistics["avg_roles_per_case"]
+
+    # Bottleneck Analysis: which roles perform the bottleneck activities
+    # identified by step_duration_analysis (reused, not recomputed).
+    bottleneck_activities = (
+        set(step_analysis["bottlenecks"][ACTIVITY_COL])
+        if not step_analysis["bottlenecks"].empty
+        else set()
+    )
+    role_bottleneck = role_activity[role_activity[ACTIVITY_COL].isin(bottleneck_activities)]
+    role_bottleneck_ranking = (
+        role_bottleneck.groupby(ROLE_COL)["occurrences"]
+        .sum()
+        .sort_values(ascending=False)
+        .reset_index()
+        if not role_bottleneck.empty
+        else pd.DataFrame(columns=[ROLE_COL, "occurrences"])
+    )
+
+    longest_duration_roles = role_workload.sort_values(
+        "avg_step_duration_hours", ascending=False
+    )
+
+    # Rework Analysis: attribute repeated (Case ID, Activity Name) pairs
+    # (already computed in rework_analysis, not recomputed here) to whichever
+    # Role performed them.
+    rework_only = rework["rework_only"]
+    if not rework_only.empty and ROLE_COL in df.columns:
+        role_lookup = df[[CASE_ID_COL, ACTIVITY_COL, ROLE_COL]].drop_duplicates(
+            subset=[CASE_ID_COL, ACTIVITY_COL]
+        )
+        rework_with_role = rework_only.merge(
+            role_lookup, on=[CASE_ID_COL, ACTIVITY_COL], how="left"
+        )
+        role_rework_ranking = (
+            rework_with_role.groupby(ROLE_COL)["rework_times"]
+            .sum()
+            .sort_values(ascending=False)
+            .reset_index()
+        )
+    else:
+        role_rework_ranking = pd.DataFrame(columns=[ROLE_COL, "rework_times"])
+
+    top_bottleneck_role = (
+        role_bottleneck_ranking.iloc[0][ROLE_COL] if not role_bottleneck_ranking.empty else None
+    )
+    top_rework_role = (
+        role_rework_ranking.iloc[0][ROLE_COL] if not role_rework_ranking.empty else None
+    )
+
+    return {
+        "role_activity": role_activity,
+        "role_workload": role_workload,
+        "avg_roles_per_case": avg_roles_per_case,
+        "role_bottleneck_ranking": role_bottleneck_ranking,
+        "longest_duration_roles": longest_duration_roles,
+        "role_rework_ranking": role_rework_ranking,
+        "top_bottleneck_role": top_bottleneck_role,
+        "top_rework_role": top_rework_role,
+    }
+
+
+# ---------------------------------------------------------------------------
+# CR-06: Regional analysis (only meaningful when the event log has a
+# 'Region' column -- region_statistics is None otherwise).
+# ---------------------------------------------------------------------------
+def region_analysis(
+    region_statistics: Optional[Dict[str, Any]],
+    rework: Dict[str, Any],
+    step_analysis: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if region_statistics is None:
+        return None
+
+    case_region = region_statistics["case_region"]
+    region_lead_time = region_statistics["region_lead_time"]
+    region_activity = region_statistics["region_activity"]
+    region_waiting = region_statistics["region_waiting"]
+
+    # Rework Distribution: reuse the case-level rework flag from
+    # rework_analysis instead of recomputing which cases had rework.
+    cases_with_rework_list = rework["cases_with_rework_list"]
+    case_region_rework = case_region.copy()
+    case_region_rework["has_rework"] = case_region_rework[CASE_ID_COL].isin(
+        cases_with_rework_list
+    )
+    region_rework = (
+        case_region_rework.groupby(REGION_COL)
+        .agg(rework_cases=("has_rework", "sum"), total_cases=(CASE_ID_COL, "count"))
+        .reset_index()
+    )
+    region_rework["rework_rate_pct"] = (
+        region_rework["rework_cases"] / region_rework["total_cases"] * 100
+    ).round(2)
+
+    # Bottleneck Distribution: reuse the bottleneck activity list from
+    # step_duration_analysis instead of recomputing it.
+    bottleneck_activities = (
+        set(step_analysis["bottlenecks"][ACTIVITY_COL])
+        if not step_analysis["bottlenecks"].empty
+        else set()
+    )
+    region_bottleneck = region_activity[region_activity[ACTIVITY_COL].isin(bottleneck_activities)]
+    region_bottleneck_ranking = (
+        region_bottleneck.groupby(REGION_COL)["occurrences"]
+        .sum()
+        .reset_index()
+        .sort_values("occurrences", ascending=False)
+        if not region_bottleneck.empty
+        else pd.DataFrame(columns=[REGION_COL, "occurrences"])
+    )
+    total_bottleneck_occurrences = (
+        region_bottleneck_ranking["occurrences"].sum()
+        if not region_bottleneck_ranking.empty
+        else 0
+    )
+    region_bottleneck_ranking["share_pct"] = (
+        (region_bottleneck_ranking["occurrences"] / total_bottleneck_occurrences * 100).round(1)
+        if total_bottleneck_occurrences
+        else 0
+    )
+
+    # Regional Leaders / Outsiders: lowest / highest average lead time.
+    leader = (
+        region_lead_time.sort_values("avg_lead_time").iloc[0]
+        if not region_lead_time.empty
+        else None
+    )
+    outsider = (
+        region_lead_time.sort_values("avg_lead_time", ascending=False).iloc[0]
+        if not region_lead_time.empty
+        else None
+    )
+
+    # Pattern Detection / Automated Insights & Recommendations.
+    insights: List[str] = []
+    recommendations: List[str] = []
+
+    if leader is not None:
+        insights.append(
+            f"Регіон {leader[REGION_COL]} демонструє найнижчий середній Lead Time "
+            f"({leader['avg_lead_time']:.2f} год)."
+        )
+        recommendations.append(f"Тиражувати практики регіону {leader[REGION_COL]}.")
+
+    if outsider is not None and (leader is None or outsider[REGION_COL] != leader[REGION_COL]):
+        insights.append(
+            f"Регіон {outsider[REGION_COL]} демонструє найвищий середній Lead Time "
+            f"({outsider['avg_lead_time']:.2f} год)."
+        )
+        recommendations.append(f"Дослідити процес погодження в регіоні {outsider[REGION_COL]}.")
+
+    if not region_rework.empty:
+        worst_rework = region_rework.sort_values("rework_rate_pct", ascending=False).iloc[0]
+        insights.append(
+            f"Регіон {worst_rework[REGION_COL]} має найвищу частку rework "
+            f"({worst_rework['rework_rate_pct']}%)."
+        )
+
+    if not region_bottleneck_ranking.empty:
+        top_bn = region_bottleneck_ranking.iloc[0]
+        insights.append(
+            f"Регіон {top_bn[REGION_COL]} містить {top_bn['share_pct']}% "
+            "усіх виявлених bottleneck-активностей."
+        )
+
+    if not region_waiting.empty:
+        worst_waiting = region_waiting.sort_values("avg_waiting_hours", ascending=False).iloc[0]
+        insights.append(
+            f"Найбільша концентрація затримок (waiting time) спостерігається в регіоні "
+            f"{worst_waiting[REGION_COL]} ({worst_waiting['avg_waiting_hours']:.2f} год очікування на крок)."
+        )
+
+    if not region_activity.empty:
+        workload_by_region = region_activity.groupby(REGION_COL)["occurrences"].sum()
+        if not workload_by_region.empty:
+            busiest_region = workload_by_region.idxmax()
+            insights.append(
+                f"Найбільша концентрація робочого навантаження — у регіоні {busiest_region}."
+            )
+
+    return {
+        "region_lead_time": region_lead_time,
+        "region_activity": region_activity,
+        "region_rework": region_rework,
+        "region_bottleneck_ranking": region_bottleneck_ranking,
+        "leader": leader,
+        "outsider": outsider,
+        "insights": insights,
+        "recommendations": recommendations,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Executive summary, recommendations, maturity score
 # ---------------------------------------------------------------------------
 def build_executive_summary(
@@ -307,6 +524,8 @@ def build_executive_summary(
     unique_variants: int,
     total_cases: int,
     top1_share: float,
+    role_analysis_result: Optional[Dict[str, Any]] = None,
+    region_analysis_result: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, str]:
     lead_diff = mean_lead_rework - mean_lead_no_rework
     summary_text = ""
@@ -344,6 +563,29 @@ def build_executive_summary(
     elif top1_share > 70:
         summary_text += "📏 Процес добре стандартизований з домінуючим основним сценарієм.\n\n"
 
+    # CR-07: Organizational Findings (only when Role column was present).
+    if role_analysis_result is not None:
+        summary_text += "\n**👥 Organizational Findings**\n\n"
+        if role_analysis_result.get("top_bottleneck_role"):
+            summary_text += (
+                f"🚧 Роль, найбільше пов'язана з bottleneck-активностями: "
+                f"**{role_analysis_result['top_bottleneck_role']}**.\n\n"
+            )
+        if role_analysis_result.get("top_rework_role"):
+            summary_text += (
+                f"🔁 Роль з найвищою частотою rework: "
+                f"**{role_analysis_result['top_rework_role']}**.\n\n"
+            )
+        avg_roles = role_analysis_result.get("avg_roles_per_case")
+        if avg_roles is not None:
+            summary_text += f"👤 Середня кількість ролей на кейс (Average FTE per Case): {avg_roles:.2f}.\n\n"
+
+    # CR-07: Regional Findings (only when Region column was present).
+    if region_analysis_result is not None:
+        summary_text += "\n**🌍 Regional Findings**\n\n"
+        for insight in region_analysis_result.get("insights", []):
+            summary_text += f"📍 {insight}\n\n"
+
     recommendations = "### 📌 Рекомендації:\n\n"
     if percent_rework > 30:
         recommendations += "- Зменшити причини повторних кроків (аналіз root cause rework).\n"
@@ -354,6 +596,16 @@ def build_executive_summary(
         "- Стандартизувати варіативні сценарії або формалізувати винятки.\n"
         "- Впровадити SLA для критичних переходів.\n"
     )
+
+    # CR-07: Recommended Actions from role/region analysis.
+    if role_analysis_result is not None and role_analysis_result.get("top_bottleneck_role"):
+        recommendations += (
+            f"- Переглянути навантаження та процедури ролі "
+            f"**{role_analysis_result['top_bottleneck_role']}**.\n"
+        )
+    if region_analysis_result is not None:
+        for rec in region_analysis_result.get("recommendations", []):
+            recommendations += f"- {rec}\n"
 
     return {"summary_text": summary_text, "recommendations": recommendations}
 
@@ -415,10 +667,11 @@ def build_improvement_roadmap(
 # case_times / activity_statistics tables and hand back one dict that
 # app.py and reporting.py both consume.
 # ---------------------------------------------------------------------------
-def build_full_analysis(analysis_data: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
+def build_full_analysis(analysis_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     analysis_data: the dict returned by case_metrics.prepare_analysis_data()
-    (keys: "df", "case_times", "activity_statistics").
+    (keys: "df", "case_times", "activity_statistics", "role_statistics",
+    "region_statistics").
     """
     df = analysis_data["df"]
     case_times = analysis_data["case_times"]
@@ -432,6 +685,11 @@ def build_full_analysis(analysis_data: Dict[str, pd.DataFrame]) -> Dict[str, Any
     transitions = transitions_analysis(df)
     variants = variant_analysis(df, case_times)
 
+    # CR-05/CR-06: only produced when the respective column exists.
+    role_result = role_analysis(df, analysis_data.get("role_statistics"), rework, step_analysis)
+    region_result = region_analysis(analysis_data.get("region_statistics"), rework, step_analysis)
+    avg_fte_per_case = role_result["avg_roles_per_case"] if role_result is not None else None
+
     executive_summary = build_executive_summary(
         percent_rework=rework["percent_rework"],
         mean_lead_rework=lead_time["mean_lead_rework"],
@@ -442,6 +700,8 @@ def build_full_analysis(analysis_data: Dict[str, pd.DataFrame]) -> Dict[str, Any
         unique_variants=variants["unique_variants"],
         total_cases=variants["total_cases"],
         top1_share=variants["top1_share"],
+        role_analysis_result=role_result,
+        region_analysis_result=region_result,
     )
 
     maturity_score = compute_maturity_score(
@@ -470,6 +730,9 @@ def build_full_analysis(analysis_data: Dict[str, pd.DataFrame]) -> Dict[str, Any
         "step_analysis": step_analysis,
         "transitions": transitions,
         "variants": variants,
+        "role_analysis": role_result,
+        "region_analysis": region_result,
+        "avg_fte_per_case": avg_fte_per_case,
         "executive_summary": executive_summary,
         "maturity_score": maturity_score,
         "ai_narrative": ai_narrative,
