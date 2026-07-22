@@ -349,7 +349,7 @@ def _build_lead_time_page(elements: list, styles: dict, visualizations, result) 
             logger.warning("Lead time boxplot rebuild failed: %s", e)
             fig = None
 
-    img = _image_flowable(_matplotlib_to_png(fig), max_width_cm=13)
+    img = _image_flowable(_plotly_to_png(fig), max_width_cm=13)
     if img is not None:
         elements.append(img)
     else:
