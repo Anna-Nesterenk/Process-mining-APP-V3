@@ -15,6 +15,29 @@
 
 ---
 
+# Методологія розрахунку часу (Time Calculation Methodology)
+
+Усі розрахунки, пов'язані з часом і тривалістю процесу (Lead Time, тривалість
+кейсу, Waiting Time, тривалість окремих активностей), виконуються на основі
+**календарних днів і годин за моделлю 24/7**.
+
+Поточна версія застосунку **не розрізняє**:
+
+* робочі та неробочі години;
+* робочі дні та вихідні;
+* державні свята;
+* індивідуальні графіки роботи співробітників;
+* часові пояси.
+
+Тому всі часові показники відображають фактичний календарний час між
+відповідними мітками часу (timestamps), а не "робочий" час у прийнятому в
+компанії розумінні. Це саме формулювання відображається користувачу в розділі
+**Загальна статистика логів** (UI) та на завершальній сторінці PDF Executive
+Report — єдине джерело цього тексту: `modules/config.py`
+(`TIME_METHODOLOGY_TITLE` / `TIME_METHODOLOGY_TEXT`).
+
+---
+
 # Основні можливості
 
 * 📂 Завантаження журналу подій з Excel
@@ -174,27 +197,48 @@ process_mining_app/
 
 ## modules/case_metrics.py
 
-**Single Source of Truth** для всіх кейс-рівневих та activity-рівневих
-метрик.
+**Single Source of Truth** для всіх кейс-рівневих, activity-рівневих,
+role-рівневих та region-рівневих метрик.
 
 * `calculate_case_times(df)` — одна агрегація `groupby("Case ID")` на весь
   застосунок: Case ID, Start/Finish Timestamp, Duration (hours), Lead Time,
   Waiting Time, Number of Activities.
 * `calculate_activity_statistics(df)` — агрегація на рівні Case+Activity
-  (для bubble chart / risk heatmap).
-* `prepare_analysis_data(df)` — викликає обидві функції один раз і повертає
-  результат для подальшого використання в `analytics.py`, `visualizations.py`
-  та `reporting.py`.
+  (для bubble chart / step duration analysis).
+* `calculate_role_statistics(df)` — агрегація на рівні Role (лише якщо є
+  колонка **Role**), включно з розрахунком FTE (CR-02):
 
-Жоден інший модуль не повинен самостійно виконувати `groupby("Case ID")` —
-нові кейс-рівневі метрики додаються сюди.
+  ```
+  x_role  = середнє, по кейсах, у яких брала участь роль, від суми
+            тривалості всіх активностей цієї ролі в межах кейсу
+  FTE_role = x_role / 7.5 / 21 * 1.15
+  Average FTE per Case = Σ FTE_role (по всіх ролях процесу)
+  ```
+
+  Це оцінка потрібного FTE-ресурсу на один кейс, а НЕ кількість фізичних
+  співробітників і НЕ середня кількість різних ролей на кейс (це була
+  попередня, помилкова, реалізація метрики).
+* `calculate_region_statistics(df, case_times)` — агрегація на рівні Region
+  (лише якщо є колонка **Region**): Lead Time (num/avg/median/min/max),
+  Waiting Time (avg/median), Workload (total activities, avg per case,
+  частка від загального обсягу). Порожні/відсутні значення Region
+  замінюються на `"Unknown"` і аналізуються як звичайний регіон, а не
+  відкидаються.
+* `prepare_analysis_data(df)` — викликає всі функції вище один раз і
+  повертає результат для подальшого використання в `analytics.py`,
+  `visualizations.py` та `reporting.py`.
+
+Жоден інший модуль не повинен самостійно виконувати `groupby("Case ID")` /
+`groupby("Role")` / `groupby("Region")` — нові кейс-, role- чи
+region-рівневі метрики додаються сюди.
 
 ---
 
 ## modules/analytics.py
 
 Основний модуль бізнес-логіки. Споживає `case_times` /
-`activity_statistics` з `case_metrics.py` замість повторного розрахунку.
+`activity_statistics` / `role_statistics` / `region_statistics` з
+`case_metrics.py` замість повторного розрахунку.
 
 Реалізує:
 
@@ -203,12 +247,25 @@ process_mining_app/
 * Step duration / bottleneck (bubble chart) analysis;
 * Transition (Heuristics Miner edges) analysis;
 * Variant analysis;
-* Executive Summary, Maturity Score, AI Narrative, Improvement Roadmap;
+* `role_analysis()` — участь ролей у bottleneck-активностях, rework,
+  ранжування за FTE (лише якщо є колонка **Role**);
+* `region_analysis()` — Lead Time / Rework / Bottleneck / Waiting Time /
+  Workload по регіонах, визначення лідера й аутсайдера (композитний
+  рейтинг: Lead Time + Rework Rate + Bottleneck share), порівняння з
+  середнім/медіанним по всьому датасету, автоматичні insights та
+  рекомендації (лише якщо є колонка **Region**);
+* `compute_maturity_score()` — Process Maturity Score з повною
+  деталізацією (CR-04): базовий бал, кожен штраф з причиною/пороговим
+  значенням/фактичним значенням метрики, і автоматично згенеровані Focus
+  Areas — а не єдине непрозоре число;
+* Executive Summary (включно з Organizational/Regional Findings, коли
+  доступні), AI Narrative, Improvement Roadmap;
 * `build_full_analysis()` — оркеструє всі перелічені вище розрахунки один
   раз і повертає єдиний словник результатів.
 
 Нові KPI рекомендується додавати саме до цього модуля (розраховуючи їх з
-`case_times` / `activity_statistics`, а не з сирого DataFrame).
+`case_times` / `activity_statistics` / `role_statistics` /
+`region_statistics`, а не з сирого DataFrame).
 
 ---
 
@@ -228,13 +285,15 @@ process_mining_app/
 
 Використовує:
 
-* Plotly;
-* Matplotlib;
-* Seaborn;
-* Graphviz.
+* Plotly (гістограми, box plot, bubble chart, Gantt-timeline, bar/scatter
+  для Role та Region Analysis);
+* Matplotlib / Seaborn (частина внутрішніх допоміжних графіків);
+* Graphviz (Heuristics Miner, включно з SVG-версією для zoom-перегляду,
+  CR-04).
 
 Модуль лише відображає вже агреговані дані (з `case_metrics.py` /
-`analytics.py`), не виконує власних `groupby("Case ID")`.
+`analytics.py`), не виконує власних `groupby("Case ID")` /
+`groupby("Role")` / `groupby("Region")`.
 
 ---
 
@@ -254,7 +313,9 @@ process_mining_app/
 6. **[умовно]** Role Analysis — лише якщо у файлі є колонка **Role**;
 7. **[умовно]** Regional Analysis — лише якщо у файлі є колонка **Region**;
 8. Executive Summary, рекомендації (включно з organizational/regional
-   findings, якщо доступні), Process Maturity Score.
+   findings, якщо доступні), **деталізований** Process Maturity Score
+   (базовий бал, кожен штраф з причиною та пороговим значенням, Focus
+   Areas — CR-04), і Time Calculation Methodology (CR-03).
 
 Risk Heatmap повністю відсутній у застосунку (видалений з UI, візуалізацій
 та звіту).

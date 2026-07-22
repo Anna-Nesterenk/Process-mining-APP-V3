@@ -36,6 +36,8 @@ from modules.config import (
     LAYOUT,
     MANDATORY_COLUMNS,
     PAGE_TITLE,
+    TIME_METHODOLOGY_TEXT,
+    TIME_METHODOLOGY_TITLE,
 )
 from modules.metrics_tracker import render_usage_sidebar, track_metric, track_once_per_session
 from modules.models import AnalysisResult
@@ -152,6 +154,8 @@ def main():
         variants=analysis["variants"],
         executive_summary=analysis["executive_summary"],
         maturity_score=analysis["maturity_score"],
+        maturity_score_breakdown=analysis["maturity_score_breakdown"],
+        maturity_focus_areas=analysis["maturity_focus_areas"],
         ai_narrative=analysis["ai_narrative"],
         roadmap=analysis["roadmap"],
         role_analysis=analysis["role_analysis"],
@@ -177,9 +181,17 @@ def render_general_statistics(case_times, general, start_end, rework):
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric(
-            "Період дослідження",
-            f"{general['start_period'].date()} → {general['end_period'].date()}",
+        # CR-07: full date+time (not just the date) at a smaller font size
+        # with wrapping, so long values are never visually truncated the
+        # way Streamlit's default big st.metric value can be.
+        st.markdown("**Період дослідження (Analysis Period)**")
+        st.markdown(
+            f"<div style='font-size:0.95rem; line-height:1.4; "
+            f"word-break:break-word; margin-bottom:0.6rem;'>"
+            f"{general['start_period'].strftime('%d.%m.%Y %H:%M')} — "
+            f"{general['end_period'].strftime('%d.%m.%Y %H:%M')}"
+            f"</div>",
+            unsafe_allow_html=True,
         )
         st.metric("Кількість кейсів", general["num_cases"])
     with col2:
@@ -200,7 +212,12 @@ def render_general_statistics(case_times, general, start_end, rework):
     Найбільша кількість повторів спостерігається на кроках:
     {", ".join(top_rework_preview["Activity Name"].tolist()[:3]) if not top_rework_preview.empty else "—"}.
     """
-    st.info(description)
+    # CR-06 8.1: green informational block (same visual style as the
+    # "Excel successfully uploaded" success message), not the blue st.info.
+    st.success(description)
+
+    with st.expander(f"ℹ️ {TIME_METHODOLOGY_TITLE}"):
+        st.markdown(TIME_METHODOLOGY_TEXT)
 
     fig = visualizations.case_duration_histogram(case_times)
     st.plotly_chart(fig, use_container_width=True)
@@ -343,7 +360,7 @@ def render_variant_analysis_section(variants):
     st.write(f"🥇 Частка найпоширенішого сценарію: **{variants['top1_share']:.1f}%**")
     st.write(f"🏆 Частка ТОП-5 сценаріїв: **{variants['top5_share']:.1f}%**")
 
-    st.info(variants["conclusion"])
+    st.success(variants["conclusion"])
 
     return {"statistics": variants}
 
@@ -373,7 +390,34 @@ def render_role_analysis_section(role_analysis):
     st.header("👥 Process Role Analysis")
     st.caption("Розділ показано, оскільки у файлі присутня колонка **Role**.")
 
-    st.metric("Середня кількість ролей на кейс (Average FTE per Case)", f"{role_analysis['avg_roles_per_case']:.2f}")
+    # CR-02: this used to read the wrong key (avg_roles_per_case -- the
+    # average number of *distinct roles* per case, not an FTE estimate at
+    # all). It now reads the actual FTE-based metric: sum of FTE_role
+    # (x_role / 7.5 / 21 * 1.15) across every role involved in the process.
+    st.metric(
+        "Середня кількість FTE на кейс (Average FTE per Case)",
+        f"{role_analysis['avg_fte_per_case']:.2f}",
+    )
+    st.caption(
+        "Оцінка потрібного FTE-ресурсу для обробки середнього навантаження одного "
+        "кейсу — НЕ кількість фізичних співробітників чи кількість залучених ролей."
+    )
+
+    # CR-02 4.4: Role / Cases / Average Hours per Case / FTE table.
+    st.subheader("FTE за ролями (Role Analysis Table)")
+    fte_table = role_analysis["role_workload"][
+        ["Role", "cases_handled", "avg_hours_per_case", "fte"]
+    ].rename(columns={
+        "cases_handled": "Cases",
+        "avg_hours_per_case": "Average Hours per Case",
+        "fte": "FTE",
+    }).sort_values("FTE", ascending=False)
+    st.dataframe(
+        fte_table.style.format({"Average Hours per Case": "{:.2f}", "FTE": "{:.2f}"}),
+        use_container_width=True,
+    )
+    if role_analysis.get("top_fte_role"):
+        st.caption(f"🏋️ Роль з найвищим FTE: **{role_analysis['top_fte_role']}**")
 
     st.subheader("Role vs Activity Matrix")
     fig_matrix = visualizations.role_activity_matrix(role_analysis["role_activity"])
@@ -429,6 +473,16 @@ def render_region_analysis_section(region_analysis):
     )
     st.plotly_chart(fig_matrix, use_container_width=True)
 
+    fig_bottleneck = None
+    st.subheader("Bottleneck Distribution by Region")
+    if not region_analysis["region_bottleneck_ranking"].empty:
+        fig_bottleneck = visualizations.region_bottleneck_bar(
+            region_analysis["region_bottleneck_ranking"]
+        )
+        st.plotly_chart(fig_bottleneck, use_container_width=True)
+    else:
+        st.info("Явно виражених bottleneck-активностей у регіональному розрізі не виявлено.")
+
     col1, col2 = st.columns(2)
     if region_analysis["leader"] is not None:
         col1.success(
@@ -450,7 +504,12 @@ def render_region_analysis_section(region_analysis):
         st.write(f"- {rec}")
 
     return {
-        "figures": {"lead_time": fig_lead_time, "rework": fig_rework, "matrix": fig_matrix},
+        "figures": {
+            "lead_time": fig_lead_time,
+            "rework": fig_rework,
+            "matrix": fig_matrix,
+            "bottleneck": fig_bottleneck,
+        },
         "statistics": region_analysis,
     }
 
@@ -464,16 +523,45 @@ def render_executive_summary_section(result: AnalysisResult):
     st.markdown(summary["recommendations"])
 
     st.subheader("📊 Process Maturity Score")
-    st.metric("Індекс зрілості процесу (0–100)", result.maturity_score)
-    if result.maturity_score > 80:
-        st.success("Процес високозрілий та контрольований.")
-    elif result.maturity_score > 50:
-        st.warning("Процес середнього рівня зрілості. Є зони для оптимізації.")
-    else:
-        st.error("Процес має значні структурні проблеми та потребує оптимізації.")
+
+    col_score, col_level = st.columns([1, 2])
+    with col_score:
+        st.metric("Індекс зрілості процесу (0–100)", result.maturity_score)
+    with col_level:
+        # Score-level color retains its semantic meaning (CR-06 8.3): green
+        # = high maturity, yellow = medium, red = low. This is separate from
+        # the green "informational" styling of the breakdown block below.
+        if result.maturity_score > 80:
+            st.success("🟢 Високий рівень зрілості: процес контрольований і стабільний.")
+        elif result.maturity_score > 50:
+            st.warning("🟡 Середній рівень зрілості: є зони для оптимізації.")
+        else:
+            st.error("🔴 Низький рівень зрілості: процес має значні структурні проблеми.")
+
+    # CR-04 6.2/6.3: transparent score breakdown -- what was deducted, why,
+    # the actual metric value, and the threshold that triggered it.
+    with st.expander("🧮 Деталізація розрахунку (Score Breakdown)", expanded=True):
+        breakdown_lines = ["**Base Score:** 100"]
+        for component in result.maturity_score_breakdown:
+            status = "застосовано" if component["applied"] else "не застосовано"
+            icon = "🔻" if component["applied"] else "⬜"
+            breakdown_lines.append(
+                f"{icon} **{component['name']}: {component['points']:+d}** ({status})  \n"
+                f"　{component['reason']}"
+            )
+        breakdown_lines.append(f"\n---\n**Final Score: {result.maturity_score} / 100**")
+        # CR-06 8.3: the explanatory breakdown itself uses the green
+        # informational style.
+        st.success("\n\n".join(breakdown_lines))
+
+    if result.maturity_focus_areas:
+        st.markdown("#### 🎯 Key Areas to Focus On")
+        for i, area in enumerate(result.maturity_focus_areas, 1):
+            st.write(f"{i}. {area}")
 
     st.header("🧠 AI Process Narrative")
-    st.info(result.ai_narrative)
+    # CR-06 8.4: green informational block instead of blue st.info.
+    st.success(result.ai_narrative)
 
     kpis = result.kpis()
 
