@@ -236,6 +236,15 @@ def calculate_region_statistics(
 
     Missing/empty Region values are treated as a normal region named
     "Unknown" (CR-01 3.2) rather than dropped from the analysis.
+
+    Sec. 4 data-quality rule: a case is expected to have exactly one Region
+    across all its events. If a Case ID has more than one distinct Region
+    value, that is a data-quality issue, not something to resolve silently
+    by picking whichever value happens to come first -- the whole case is
+    reassigned to "Unknown" instead, and the number of affected cases is
+    reported back via `inconsistent_region_cases_count` so it's visible to
+    whoever reviews the analysis rather than hidden inside an arbitrary
+    per-case choice.
     """
     if REGION_COL not in df.columns:
         return None
@@ -244,9 +253,21 @@ def calculate_region_statistics(
     df[REGION_COL] = df[REGION_COL].fillna("Unknown")
     df.loc[df[REGION_COL].astype(str).str.strip() == "", REGION_COL] = "Unknown"
 
-    # One Region per case (assumed constant within a case; first non-null,
-    # already-"Unknown"-filled value wins).
+    # Sec. 4: a case is assumed to have a single Region. Detect violations of
+    # that assumption instead of silently picking an arbitrary value with
+    # .first(). Documented deterministic rule: any Case ID that has more
+    # than one distinct Region value across its events is reassigned to
+    # "Unknown" in full (not just the conflicting rows), since we cannot
+    # know which of the conflicting values is authoritative for that case.
+    region_counts_per_case = df.groupby(CASE_ID_COL)[REGION_COL].nunique()
+    inconsistent_case_ids = region_counts_per_case[region_counts_per_case > 1].index
+    inconsistent_region_cases_count = len(inconsistent_case_ids)
+
     case_region = df.groupby(CASE_ID_COL)[REGION_COL].first().reset_index()
+    if inconsistent_region_cases_count:
+        case_region.loc[
+            case_region[CASE_ID_COL].isin(inconsistent_case_ids), REGION_COL
+        ] = "Unknown"
 
     region_case_times = case_times.merge(case_region, on=CASE_ID_COL, how="left")
     region_case_times[REGION_COL] = region_case_times[REGION_COL].fillna("Unknown")
@@ -318,6 +339,7 @@ def calculate_region_statistics(
         "region_activity": region_activity,
         "region_waiting": region_waiting,
         "region_workload": region_workload,
+        "inconsistent_region_cases_count": inconsistent_region_cases_count,
     }
 
 

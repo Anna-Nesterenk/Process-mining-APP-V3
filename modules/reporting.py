@@ -534,6 +534,39 @@ def _build_region_analysis_page(elements: list, styles: dict, result) -> None:
 
     elements.append(Paragraph("Regional Analysis", styles["subtitle"]))
 
+    # Sec. 14.1: Regional KPI Summary table (same kpi_summary dict the UI uses).
+    kpi = region["kpi_summary"]
+    kpi_rows = [
+        ["Показник", "Значення"],
+        ["Кількість регіонів (Number of Regions)", f"{kpi['num_regions']}"],
+        ["Найкращий регіон (Best Performing Region)", kpi["best_region"] or "—"],
+        ["Регіон, що потребує уваги (Region Requiring Attention)", kpi["worst_region"] or "—"],
+        ["Середній Lead Time по процесу (Overall Average Lead Time)", f"{kpi['overall_avg_lead_time']:.2f} год"],
+        ["Найвищий Rework Rate (Highest Rework Rate Region)", kpi["highest_rework_region"] or "—"],
+        ["Найвища концентрація bottleneck (Highest Bottleneck Concentration)", kpi["highest_bottleneck_region"] or "—"],
+    ]
+    kpi_table = Table(kpi_rows, colWidths=[10.5 * cm, 5.5 * cm])
+    kpi_table.setStyle(
+        TableStyle(
+            [
+                ("FONTNAME", (0, 0), (-1, 0), FONT_BOLD),
+                ("FONTNAME", (0, 1), (-1, -1), FONT_REGULAR),
+                ("FONTSIZE", (0, 0), (-1, -1), 9.5),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F2937")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F3F4F6")]),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#D1D5DB")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ]
+        )
+    )
+    elements.append(Spacer(1, 4))
+    elements.append(kpi_table)
+    elements.append(Spacer(1, 10))
+
     for caption, sub_key in [
         ("Lead Time by Region", "lead_time"),
         ("Rework by Region", "rework"),

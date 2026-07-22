@@ -551,17 +551,23 @@ def region_analysis(
         combined["total_activities"], combined["total_activities"].mean()
     )
 
-    # --- Leaders / Outsiders (CR-01 3.4): primarily Average Lead Time, but
-    # adjusted by Rework Rate and Bottleneck concentration via a composite
-    # rank (lower composite = better). Lead Time is weighted x2 since it's
-    # the default/primary criterion; Rework and Bottleneck share act as
-    # tie-breakers/adjustments as required by the spec. ---
+    # --- Leaders / Outsiders (Sec. 7): primarily Average Lead Time, but
+    # adjusted by Rework Rate, Waiting Time, and Bottleneck concentration via
+    # a composite rank (lower composite = better). Lead Time is weighted x2
+    # since it's the default/primary criterion; Rework, Waiting Time, and
+    # Bottleneck share all factor in as required by the spec so a region
+    # can't be crowned "best" purely for having the lowest Lead Time while
+    # being terrible on every other metric. ---
     if not combined.empty:
         combined["lead_time_rank"] = combined["avg_lead_time"].rank(method="min")
         combined["rework_rank"] = combined["rework_rate_pct"].rank(method="min")
+        combined["waiting_rank"] = combined["avg_waiting_hours"].rank(method="min")
         combined["bottleneck_rank"] = combined["bottleneck_share_pct"].rank(method="min")
         combined["composite_score"] = (
-            combined["lead_time_rank"] * 2 + combined["rework_rank"] + combined["bottleneck_rank"]
+            combined["lead_time_rank"] * 2
+            + combined["rework_rank"]
+            + combined["waiting_rank"]
+            + combined["bottleneck_rank"]
         )
         leader = combined.sort_values("composite_score", ascending=True).iloc[0]
         outsider = combined.sort_values("composite_score", ascending=False).iloc[0]
@@ -619,10 +625,18 @@ def region_analysis(
 
     if not region_rework.empty:
         worst_rework = region_rework.sort_values("rework_rate_pct", ascending=False).iloc[0]
-        insights.append(
-            f"Регіон {worst_rework[REGION_COL]} має найвищу частку rework "
-            f"({worst_rework['rework_rate_pct']}%)."
-        )
+        pct_points_above = worst_rework["rework_rate_pct"] - overall_rework_rate
+        if pct_points_above > 1:
+            insights.append(
+                f"Регіон {worst_rework[REGION_COL]} має найвищу частку rework "
+                f"({worst_rework['rework_rate_pct']}%), що на {pct_points_above:.0f} "
+                "в.п. вище за середній показник по процесу."
+            )
+        else:
+            insights.append(
+                f"Регіон {worst_rework[REGION_COL]} має найвищу частку rework "
+                f"({worst_rework['rework_rate_pct']}%)."
+            )
         if worst_rework["rework_rate_pct"] > overall_rework_rate * 1.2:
             recommendations.append(
                 f"Провести Root Cause Analysis повторюваних кроків у регіоні "
@@ -670,10 +684,58 @@ def region_analysis(
             f"{busiest['share_of_total_cases_pct']}% усіх кейсів)."
         )
 
+    # Pattern 6 (Sec. 9): Best Practice Region -- consistently strong across
+    # ALL FOUR metrics simultaneously (not just the single-metric "leader"),
+    # so it's meaningfully different from just having the lowest Lead Time.
+    best_practice_region = None
+    if not combined.empty:
+        below_avg_all = combined[
+            ~combined["high_lead_time_flag"]
+            & ~combined["high_rework_flag"]
+            & ~combined["high_waiting_flag"]
+            & ~combined["high_bottleneck_flag"]
+        ]
+        if not below_avg_all.empty:
+            best_practice_region = below_avg_all.sort_values("composite_score", ascending=True).iloc[0]
+            insights.append(
+                f"Регіон {best_practice_region[REGION_COL]} демонструє стабільно високі "
+                "показники одразу за кількома метриками (Lead Time, Rework Rate, Waiting "
+                "Time, Bottleneck concentration — усі нижче середнього по процесу) і може "
+                "слугувати еталоном (best practice)."
+            )
+            recommendations.append(
+                f"Проаналізувати та задокументувати практики регіону "
+                f"{best_practice_region[REGION_COL]} для тиражування в інших регіонах."
+            )
+
     if not insights:
         insights.append("Недостатньо даних для формування регіональних висновків.")
     if not recommendations:
         recommendations.append("Недостатньо даних для формування регіональних рекомендацій.")
+
+    # --- Regional KPI Summary (Sec. 13.1 / 14.1): a single small dict with
+    # exactly the six headline numbers the UI and PDF both need, computed
+    # once here so neither layer has to re-derive "highest rework region" /
+    # "highest bottleneck region" etc. on its own. ---
+    highest_rework_region = (
+        region_rework.sort_values("rework_rate_pct", ascending=False).iloc[0][REGION_COL]
+        if not region_rework.empty else None
+    )
+    highest_bottleneck_region = (
+        region_bottleneck_ranking.sort_values("share_pct", ascending=False).iloc[0][REGION_COL]
+        if not region_bottleneck_ranking.empty else None
+    )
+    kpi_summary = {
+        "num_regions": len(region_lead_time),
+        "best_region": leader[REGION_COL] if leader is not None else None,
+        "worst_region": outsider[REGION_COL] if outsider is not None else None,
+        "overall_avg_lead_time": overall_avg_lead_time,
+        "highest_rework_region": highest_rework_region,
+        "highest_bottleneck_region": highest_bottleneck_region,
+        "best_practice_region": (
+            best_practice_region[REGION_COL] if best_practice_region is not None else None
+        ),
+    }
 
     return {
         "region_lead_time": region_lead_time,
@@ -686,6 +748,8 @@ def region_analysis(
         "baseline": baseline,
         "leader": leader,
         "outsider": outsider,
+        "best_practice_region": best_practice_region,
+        "kpi_summary": kpi_summary,
         "insights": insights,
         "recommendations": recommendations,
     }
