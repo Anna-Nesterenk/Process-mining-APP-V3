@@ -459,6 +459,18 @@ def render_region_analysis_section(region_analysis):
     st.header("🌍 Regional Analysis")
     st.caption("Розділ показано, оскільки у файлі присутня колонка **Region**.")
 
+    # Sec. 13.1: Regional KPI Summary -- single source of truth for these
+    # six headline numbers is region_analysis["kpi_summary"] (analytics.py).
+    kpi = region_analysis["kpi_summary"]
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Кількість регіонів", kpi["num_regions"])
+    col2.metric("Найкращий регіон", kpi["best_region"] or "—")
+    col3.metric("Регіон, що потребує уваги", kpi["worst_region"] or "—")
+    col4, col5, col6 = st.columns(3)
+    col4.metric("Середній Lead Time (по процесу)", f"{kpi['overall_avg_lead_time']:.2f} год")
+    col5.metric("Найвищий Rework Rate", kpi["highest_rework_region"] or "—")
+    col6.metric("Найвища концентрація bottleneck", kpi["highest_bottleneck_region"] or "—")
+
     st.subheader("Lead Time by Region")
     fig_lead_time = visualizations.region_lead_time_bar(region_analysis["region_lead_time"])
     st.plotly_chart(fig_lead_time, use_container_width=True)
@@ -483,17 +495,30 @@ def render_region_analysis_section(region_analysis):
     else:
         st.info("Явно виражених bottleneck-активностей у регіональному розрізі не виявлено.")
 
-    col1, col2 = st.columns(2)
+    col_a, col_b = st.columns(2)
     if region_analysis["leader"] is not None:
-        col1.success(
+        col_a.success(
             f"🏆 Найкращий регіон: **{region_analysis['leader']['Region']}** "
             f"(Lead Time = {region_analysis['leader']['avg_lead_time']:.2f} год)"
         )
     if region_analysis["outsider"] is not None:
-        col2.error(
+        col_b.error(
             f"⚠️ Регіон, що потребує уваги: **{region_analysis['outsider']['Region']}** "
             f"(Lead Time = {region_analysis['outsider']['avg_lead_time']:.2f} год)"
         )
+
+    with st.expander("📋 Регіональні метрики (детальна таблиця)"):
+        detail_cols = [
+            c for c in [
+                "Region", "num_cases", "share_of_total_cases_pct",
+                "avg_lead_time", "median_lead_time", "min_lead_time", "max_lead_time",
+                "rework_rate_pct", "avg_waiting_hours", "median_waiting_hours",
+                "total_activities", "avg_activities_per_case", "share_of_total_activities_pct",
+                "bottleneck_share_pct",
+            ]
+            if c in region_analysis["combined"].columns
+        ]
+        st.dataframe(region_analysis["combined"][detail_cols], use_container_width=True)
 
     st.subheader("📌 Automated Insights")
     for insight in region_analysis["insights"]:
