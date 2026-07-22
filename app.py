@@ -253,7 +253,7 @@ def render_lead_time_section(lead_time):
     st.markdown("### 📈 Розподіл Lead Time: кейси з rework vs без")
 
     fig = visualizations.lead_time_boxplot(lead_time["lead_time_per_case"])
-    st.pyplot(fig)
+    st.plotly_chart(fig, use_container_width=True)
 
     st.markdown(
         f"**Середні показники по групах:**\n\n"
