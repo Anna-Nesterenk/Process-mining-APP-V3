@@ -123,20 +123,36 @@ def calculate_activity_statistics(df: pd.DataFrame) -> pd.DataFrame:
     return step_stats
 
 
+FTE_HOURS_PER_DAY = 7.5
+FTE_WORKING_DAYS_PER_MONTH = 21
+FTE_ABSENCE_FACTOR = 1.15
+
+
 def calculate_role_statistics(df: pd.DataFrame) -> Optional[Dict[str, object]]:
     """
-    CR-05: pure aggregation of role participation/workload -- the SSOT table
-    that `analytics.role_analysis` builds bottleneck/rework rankings from.
+    CR-02: pure aggregation of role participation/workload, including the
+    per-role FTE calculation -- the SSOT table that `analytics.role_analysis`
+    builds bottleneck/rework rankings and the Role Analysis table from.
 
     Returns None when the event log has no 'Role' column (CR-05 visibility
     condition: the whole Role Analysis section is skipped in that case).
 
-    FTE approximation (no real FTE data is available in this event log):
-        - "cases_handled" per role is used as a workload proxy for FTE
-          count per role (a role that touches more distinct cases has a
-          proportionally higher effective workload).
-        - "avg_roles_per_case" (avg number of distinct roles touching a
-          case) is used as the "Average FTE per Case" KPI.
+    FTE formula (CR-02, replaces the previous `avg_roles_per_case` proxy,
+    which measured something different -- the average number of distinct
+    roles touching a case -- and was never a real FTE estimate):
+
+        FTE_role = x_role / 7.5 / 21 * 1.15
+
+    where `x_role` ("Average Hours per Case" for the role) is:
+
+        x_role = average, over every case the role participated in, of the
+                 SUM of that role's activity durations within that case.
+
+    i.e. first sum step_duration_hours per (Case ID, Role) -- how much
+    active time this role spent on this specific case -- then average that
+    per-case total across all cases the role touched. This is an estimate
+    of the FTE headcount required to sustain the role's average workload
+    per case, NOT a count of distinct people or distinct roles.
     """
     if ROLE_COL not in df.columns:
         return None
@@ -150,23 +166,59 @@ def calculate_role_statistics(df: pd.DataFrame) -> Optional[Dict[str, object]]:
         .reset_index()
     )
 
-    role_workload = (
-        df.groupby(ROLE_COL)
-        .agg(
-            cases_handled=(CASE_ID_COL, "nunique"),
-            activities_performed=(ACTIVITY_COL, "count"),
-            avg_step_duration_hours=(STEP_DURATION_COL, "mean"),
-        )
-        .reset_index()
-        .sort_values("cases_handled", ascending=False)
+    # x_role: total active hours per (Case ID, Role), then averaged across
+    # the cases that role participated in.
+    case_role_duration = (
+        df.groupby([CASE_ID_COL, ROLE_COL])[STEP_DURATION_COL]
+        .sum()
+        .reset_index(name="total_duration_hours")
+    )
+    role_avg_hours_per_case = (
+        case_role_duration.groupby(ROLE_COL)["total_duration_hours"]
+        .mean()
+        .reset_index(name="avg_hours_per_case")
     )
 
-    avg_roles_per_case = df.groupby(CASE_ID_COL)[ROLE_COL].nunique().mean()
+    role_cases = (
+        df.groupby(ROLE_COL)[CASE_ID_COL].nunique().reset_index(name="cases_handled")
+    )
+    role_activities_performed = (
+        df.groupby(ROLE_COL)[ACTIVITY_COL].count().reset_index(name="activities_performed")
+    )
+    # Per-event average duration (different grain than x_role above -- this
+    # is "how long is a typical single step for this role", used to rank
+    # roles by step-level slowness; x_role is "how much total time does
+    # this role spend per case", used for the FTE calculation).
+    role_avg_event_duration = (
+        df.groupby(ROLE_COL)[STEP_DURATION_COL].mean().reset_index(name="avg_step_duration_hours")
+    )
+
+    role_workload = (
+        role_cases
+        .merge(role_avg_hours_per_case, on=ROLE_COL, how="left")
+        .merge(role_activities_performed, on=ROLE_COL, how="left")
+        .merge(role_avg_event_duration, on=ROLE_COL, how="left")
+    )
+    role_workload["avg_hours_per_case"] = role_workload["avg_hours_per_case"].fillna(0.0)
+
+    # CR-02 FTE formula.
+    role_workload["fte"] = (
+        role_workload["avg_hours_per_case"]
+        / FTE_HOURS_PER_DAY
+        / FTE_WORKING_DAYS_PER_MONTH
+        * FTE_ABSENCE_FACTOR
+    )
+    role_workload = role_workload.sort_values("cases_handled", ascending=False)
+
+    # CR-02 4.5: Average FTE per Case = sum of FTE_role across all roles
+    # involved in the process (an estimate of the total FTE resource needed
+    # to handle one average case, NOT a headcount of distinct people/roles).
+    avg_fte_per_case = float(role_workload["fte"].sum())
 
     return {
         "role_activity": role_activity,
         "role_workload": role_workload,
-        "avg_roles_per_case": avg_roles_per_case,
+        "avg_fte_per_case": avg_fte_per_case,
     }
 
 
@@ -174,51 +226,98 @@ def calculate_region_statistics(
     df: pd.DataFrame, case_times: pd.DataFrame
 ) -> Optional[Dict[str, object]]:
     """
-    CR-06: pure aggregation of region-level lead time / activity data -- the
-    SSOT table that `analytics.region_analysis` builds insights/
-    recommendations from.
+    CR-01: pure aggregation of region-level Lead Time / Waiting Time /
+    Workload / Activity data -- the SSOT tables that `analytics.
+    region_analysis` builds Rework/Bottleneck attribution, Leader/Outsider
+    ranking, pattern detection and recommendations from.
 
-    Returns None when the event log has no 'Region' column (CR-06
+    Returns None when the event log has no 'Region' column (CR-01 3.2
     visibility condition).
+
+    Missing/empty Region values are treated as a normal region named
+    "Unknown" (CR-01 3.2) rather than dropped from the analysis.
     """
     if REGION_COL not in df.columns:
         return None
 
-    # One Region per case (assumed constant within a case; first non-null wins).
+    df = df.copy()
+    df[REGION_COL] = df[REGION_COL].fillna("Unknown")
+    df.loc[df[REGION_COL].astype(str).str.strip() == "", REGION_COL] = "Unknown"
+
+    # One Region per case (assumed constant within a case; first non-null,
+    # already-"Unknown"-filled value wins).
     case_region = df.groupby(CASE_ID_COL)[REGION_COL].first().reset_index()
 
     region_case_times = case_times.merge(case_region, on=CASE_ID_COL, how="left")
+    region_case_times[REGION_COL] = region_case_times[REGION_COL].fillna("Unknown")
+
+    # --- Lead Time (CR-01 3.3): num cases, avg/median/min/max ---
     region_lead_time = (
         region_case_times.groupby(REGION_COL)
         .agg(
+            num_cases=(CASE_ID_COL, "count"),
             avg_lead_time=("Lead Time", "mean"),
             median_lead_time=("Lead Time", "median"),
-            num_cases=(CASE_ID_COL, "count"),
+            min_lead_time=("Lead Time", "min"),
+            max_lead_time=("Lead Time", "max"),
         )
         .reset_index()
         .sort_values("avg_lead_time", ascending=False)
     )
 
+    # --- Region + Activity grain (bottleneck attribution / most-critical
+    # steps) -- single aggregation pass, reused by analytics.region_analysis
+    # rather than recomputed there. ---
     region_activity = (
         df.groupby([REGION_COL, ACTIVITY_COL])
         .agg(
             occurrences=(ACTIVITY_COL, "count"),
             avg_duration_hours=(STEP_DURATION_COL, "mean"),
+            total_duration_hours=(STEP_DURATION_COL, "sum"),
         )
         .reset_index()
     )
 
-    region_waiting = (
-        df.groupby(REGION_COL)[WAITING_COL].mean().reset_index(name="avg_waiting_hours")
-        if WAITING_COL in df.columns
-        else pd.DataFrame({REGION_COL: region_lead_time[REGION_COL], "avg_waiting_hours": 0.0})
+    # --- Waiting Time (CR-01 3.3): avg + median ---
+    if WAITING_COL in df.columns:
+        region_waiting = (
+            df.groupby(REGION_COL)[WAITING_COL]
+            .agg(["mean", "median"])
+            .rename(columns={"mean": "avg_waiting_hours", "median": "median_waiting_hours"})
+            .reset_index()
+        )
+    else:
+        region_waiting = pd.DataFrame(
+            {REGION_COL: region_lead_time[REGION_COL], "avg_waiting_hours": 0.0, "median_waiting_hours": 0.0}
+        )
+
+    # --- Workload (CR-01 3.3): total activities, avg per case, share of
+    # total case/activity volume across the whole dataset. ---
+    total_activities_all = len(df)
+    total_cases_all = len(case_times)
+
+    region_workload = df.groupby(REGION_COL)[ACTIVITY_COL].count().reset_index(name="total_activities")
+    region_num_cases = region_case_times.groupby(REGION_COL)[CASE_ID_COL].nunique().reset_index(name="num_cases")
+    region_workload = region_workload.merge(region_num_cases, on=REGION_COL, how="left")
+    region_workload["avg_activities_per_case"] = (
+        region_workload["total_activities"] / region_workload["num_cases"].replace(0, pd.NA)
+    )
+    region_workload["share_of_total_activities_pct"] = (
+        (region_workload["total_activities"] / total_activities_all * 100).round(1)
+        if total_activities_all else 0.0
+    )
+    region_workload["share_of_total_cases_pct"] = (
+        (region_workload["num_cases"] / total_cases_all * 100).round(1)
+        if total_cases_all else 0.0
     )
 
     return {
         "case_region": case_region,
+        "region_case_times": region_case_times,
         "region_lead_time": region_lead_time,
         "region_activity": region_activity,
         "region_waiting": region_waiting,
+        "region_workload": region_workload,
     }
 
 

@@ -76,7 +76,7 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from modules.config import AUTHOR_LINKEDIN, AUTHOR_NAME, PDF_FONT_NAME
+from modules.config import AUTHOR_LINKEDIN, AUTHOR_NAME, PDF_FONT_NAME, TIME_METHODOLOGY_TEXT, TIME_METHODOLOGY_TITLE
 
 logger = logging.getLogger(__name__)
 
@@ -266,7 +266,7 @@ def _build_kpi_summary(elements: list, styles: dict, kpis: Dict[str, Any]) -> No
 
     avg_fte = kpis.get("avg_fte_per_case")
     if avg_fte is not None:
-        rows.append(["Середня к-сть ролей на кейс (Average FTE per Case)", f"{avg_fte:.2f}"])
+        rows.append(["Average FTE per Case", f"{avg_fte:.2f}"])
 
     table = Table(rows, colWidths=[10.5 * cm, 5.5 * cm])
     table.setStyle(
@@ -445,11 +445,48 @@ def _build_role_analysis_page(elements: list, styles: dict, result) -> None:
     elements.append(Paragraph("Role Analysis", styles["subtitle"]))
     elements.append(
         Paragraph(
-            f"Середня кількість ролей на кейс (Average FTE per Case): "
-            f"<b>{role['avg_roles_per_case']:.2f}</b>",
+            f"Середня кількість FTE на кейс (Average FTE per Case): "
+            f"<b>{role['avg_fte_per_case']:.2f}</b> "
+            "(оцінка потрібного FTE-ресурсу на один кейс, а не кількість фізичних "
+            "співробітників).",
             styles["base"],
         )
     )
+
+    # CR-02 4.4: Role / Cases / Average Hours per Case / FTE table.
+    fte_df = role["role_workload"][["Role", "cases_handled", "avg_hours_per_case", "fte"]].sort_values(
+        "fte", ascending=False
+    )
+    fte_rows = [["Role", "Cases", "Average Hours per Case", "FTE"]] + [
+        [
+            str(r["Role"]),
+            f"{int(r['cases_handled'])}",
+            f"{r['avg_hours_per_case']:.2f}",
+            f"{r['fte']:.2f}",
+        ]
+        for _, r in fte_df.iterrows()
+    ]
+    fte_table = Table(fte_rows, colWidths=[5.5 * cm, 3 * cm, 5 * cm, 2.5 * cm])
+    fte_table.setStyle(
+        TableStyle(
+            [
+                ("FONTNAME", (0, 0), (-1, 0), FONT_BOLD),
+                ("FONTNAME", (0, 1), (-1, -1), FONT_REGULAR),
+                ("FONTSIZE", (0, 0), (-1, -1), 9.5),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F2937")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F3F4F6")]),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#D1D5DB")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ]
+        )
+    )
+    elements.append(Spacer(1, 6))
+    elements.append(fte_table)
+    elements.append(Spacer(1, 10))
 
     for caption, sub_key in [
         ("Role vs Activity Matrix", "matrix"),
@@ -478,6 +515,13 @@ def _build_role_analysis_page(elements: list, styles: dict, result) -> None:
                 styles["insight"],
             )
         )
+    if role.get("top_fte_role"):
+        elements.append(
+            Paragraph(
+                f"🏋️ Роль з найвищим FTE: <b>{role['top_fte_role']}</b>",
+                styles["insight"],
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +538,7 @@ def _build_region_analysis_page(elements: list, styles: dict, result) -> None:
         ("Lead Time by Region", "lead_time"),
         ("Rework by Region", "rework"),
         ("Regional Performance Matrix", "matrix"),
+        ("Bottleneck Distribution by Region", "bottleneck"),
     ]:
         fig = _figure_from_result(result, "region_analysis", sub_key)
         img = _image_flowable(_plotly_to_png(fig), max_width_cm=15)
@@ -534,7 +579,8 @@ def _build_region_analysis_page(elements: list, styles: dict, result) -> None:
 # Final page: Executive Summary (unchanged content/order of sections)
 # ---------------------------------------------------------------------------
 def _build_executive_summary_section(
-    elements: list, styles: dict, summary_text: str, recommendations: str, maturity_score: int
+    elements: list, styles: dict, summary_text: str, recommendations: str,
+    maturity_score: int, maturity_score_breakdown: list, maturity_focus_areas: list,
 ) -> None:
     elements.append(Paragraph("Executive Summary", styles["subtitle"]))
     elements.append(Paragraph(summary_text.replace("\n", "<br/>"), styles["base"]))
@@ -544,14 +590,55 @@ def _build_executive_summary_section(
     elements.append(Paragraph(recommendations.replace("\n", "<br/>"), styles["base"]))
     elements.append(Spacer(1, 8))
 
+    # CR-04: full, explainable breakdown instead of a single opaque number.
     elements.append(Paragraph("Process Maturity Score", styles["subtitle"]))
-    maturity_text = (
-        "Process Maturity Score — це інтегральний показник зрілості процесу (шкала 0–100). "
-        "Він враховує рівень повторних кроків (rework), варіативність сценаріїв, "
-        "наявність bottleneck'ів та стабільність виконання процесу.<br/><br/>"
-        f"<b>Поточне значення індексу: {maturity_score}/100.</b>"
+    elements.append(
+        Paragraph(f"<b>Score = {maturity_score} / 100</b>", styles["base"])
     )
-    elements.append(Paragraph(maturity_text, styles["base"]))
+
+    if maturity_score_breakdown:
+        rows = [["Component", "Points", "Applied", "Reason"]]
+        rows.append(["Base Score", "100", "—", "Starting score before penalties."])
+        for c in maturity_score_breakdown:
+            rows.append([
+                c["name"],
+                f"{c['points']:+d}",
+                "Yes" if c["applied"] else "No",
+                c["reason"],
+            ])
+        table = Table(rows, colWidths=[4 * cm, 1.8 * cm, 1.7 * cm, 8.5 * cm])
+        table.setStyle(
+            TableStyle(
+                [
+                    ("FONTNAME", (0, 0), (-1, 0), FONT_BOLD),
+                    ("FONTNAME", (0, 1), (-1, -1), FONT_REGULAR),
+                    ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F2937")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F3F4F6")]),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#D1D5DB")),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ]
+            )
+        )
+        elements.append(Spacer(1, 6))
+        elements.append(table)
+        elements.append(Spacer(1, 10))
+
+    if maturity_focus_areas:
+        elements.append(Paragraph("Key Areas to Focus On", styles["chart_caption"]))
+        for i, area in enumerate(maturity_focus_areas, 1):
+            elements.append(Paragraph(f"{i}. {area}", styles["insight"]))
+        elements.append(Spacer(1, 8))
+
+    # CR-03 / item 10: Time Calculation Methodology disclosure.
+    elements.append(Paragraph(TIME_METHODOLOGY_TITLE, styles["subtitle"]))
+    elements.append(
+        Paragraph(TIME_METHODOLOGY_TEXT.replace("\n", "<br/>"), styles["base"])
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -629,6 +716,8 @@ def generate_pdf_report(result) -> BytesIO:
         exec_summary.get("summary_text", ""),
         exec_summary.get("recommendations", ""),
         result.maturity_score,
+        result.maturity_score_breakdown,
+        result.maturity_focus_areas,
     )
 
     doc.build(elements)

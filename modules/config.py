@@ -60,3 +60,25 @@ DEFAULT_METRICS = {
 # be committed to / found in the repo. This name is just the ReportLab
 # registration key.
 PDF_FONT_NAME = "DejaVuSans"
+
+# ---------------------------------------------------------------------------
+# CR-03: Time Calculation Methodology
+# ---------------------------------------------------------------------------
+# Single source of truth for this disclosure text -- quoted verbatim in the
+# UI (General Statistics section), the PDF Executive Report, and README.md,
+# so the three can never drift out of sync.
+TIME_METHODOLOGY_TITLE = "Методологія розрахунку часу (Time Calculation Methodology)"
+TIME_METHODOLOGY_TEXT = (
+    "Усі розрахунки, пов'язані з часом і тривалістю процесу, виконуються на основі "
+    "календарних днів і годин за моделлю 24/7.\n\n"
+    "При розрахунку Lead Time, тривалості кейсу, Waiting Time та тривалості окремих "
+    "активностей неробочий час не виключається.\n\n"
+    "Поточна версія застосунку не розрізняє:\n"
+    "- робочі та неробочі години;\n"
+    "- робочі дні та вихідні;\n"
+    "- державні свята;\n"
+    "- індивідуальні графіки роботи співробітників;\n"
+    "- часові пояси.\n\n"
+    "Тому всі часові показники відображають фактичний календарний час між "
+    "відповідними мітками часу (timestamps)."
+)

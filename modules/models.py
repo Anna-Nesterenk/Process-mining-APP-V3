@@ -41,6 +41,8 @@ class AnalysisResult:
 
     executive_summary: Dict[str, Any] = field(default_factory=dict)
     maturity_score: int = 0
+    maturity_score_breakdown: list = field(default_factory=list)
+    maturity_focus_areas: list = field(default_factory=list)
     ai_narrative: str = ""
     roadmap: list = field(default_factory=list)
 

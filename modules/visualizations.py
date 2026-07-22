@@ -32,21 +32,41 @@ def case_duration_histogram(case_times: pd.DataFrame):
 
 
 def lead_time_boxplot(lead_time_per_case: pd.DataFrame):
-    fig = plt.figure(figsize=(3, 1))
-    sns.boxplot(
-        data=lead_time_per_case,
+    """
+    CR-05: rebuilt as a Plotly box plot (was a matplotlib figure rendered at
+    an unreadable 3x1 inch / 3-4pt font size -- the "visually compressed /
+    flattened" chart described in the CR). Plotly gives us, in one change:
+    a real height (>=500px), thin box outlines, readable axis labels,
+    generous margins, and a responsive layout via
+    `st.plotly_chart(fig, use_container_width=True)` in app.py.
+    """
+    df = lead_time_per_case.copy()
+    category_order = ["Без повторень", "З повтореннями"]
+
+    fig = px.box(
+        df,
         x="lead_time",
         y="rework_label",
-        palette={"З повтореннями": "red", "Без повторень": "green"},
-        width=0.5,
-        fliersize=1,
+        color="rework_label",
+        color_discrete_map={"З повтореннями": "#E74C3C", "Без повторень": "#2ECC71"},
+        category_orders={"rework_label": category_order},
+        points="outliers",
+        title="Розподіл Lead Time: кейси з Rework vs без",
     )
-    plt.xlabel("Lead Time (год)", fontsize=3)
-    plt.ylabel("", fontsize=3)
-    plt.title("Розподіл тривалості кейсів з Rework та без", fontsize=4)
-    plt.xticks(fontsize=3)
-    plt.yticks(fontsize=3)
-    plt.tight_layout()
+    fig.update_traces(line=dict(width=1.5), marker=dict(size=5, opacity=0.6))
+    fig.update_layout(
+        height=520,
+        showlegend=False,  # the y-axis categories already label each group
+        xaxis_title="Lead Time (год)",
+        yaxis_title="",
+        font=dict(size=14),
+        title_font=dict(size=18),
+        margin=dict(l=140, r=40, t=70, b=60),
+        boxgap=0.4,
+        plot_bgcolor="white",
+    )
+    fig.update_xaxes(tickfont=dict(size=13), gridcolor="#E5E7EB")
+    fig.update_yaxes(tickfont=dict(size=15))
     return fig
 
 
@@ -336,4 +356,26 @@ def region_performance_matrix(region_lead_time: pd.DataFrame, region_rework: pd.
         size_max=40,
     )
     fig.update_traces(textposition="top center")
+    return fig
+
+
+def region_bottleneck_bar(region_bottleneck_ranking: pd.DataFrame):
+    """CR-01 3.8 (4): concentration of bottleneck-activity occurrences by
+    region, as its own dedicated chart (distinct from the Performance
+    Matrix, which plots Lead Time vs Rework)."""
+    if region_bottleneck_ranking is None or region_bottleneck_ranking.empty:
+        return None
+    hover_cols = [
+        c for c in ["occurrences", "num_bottleneck_activities", "top_bottleneck_activity"]
+        if c in region_bottleneck_ranking.columns
+    ]
+    fig = px.bar(
+        region_bottleneck_ranking.sort_values("share_pct", ascending=False),
+        x="Region",
+        y="share_pct",
+        text_auto=".1f",
+        title="Bottleneck Distribution by Region",
+        labels={"share_pct": "Частка bottleneck-активностей (%)"},
+        hover_data=hover_cols,
+    )
     return fig
