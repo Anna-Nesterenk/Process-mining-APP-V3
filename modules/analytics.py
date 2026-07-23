@@ -309,12 +309,26 @@ def variant_analysis(df: pd.DataFrame, case_times: pd.DataFrame) -> Dict[str, An
             "про нестандартизовані процедури або виняткові кейси."
         )
 
+    # Req 2 / Sec 10.3: per-Top-5-variant average Lead Time, computed once
+    # here (both `variants` and `case_times` are already available in this
+    # function) so the Improvement Roadmap can quantify "benchmark variant
+    # vs inefficient variant" impact from a real in-dataset comparison
+    # instead of an assumption.
+    case_lead_time = case_times.set_index(CASE_ID_COL)["Lead Time"]
+    variant_lead_time_top5 = (
+        case_lead_time.reindex(variants.index)
+        .groupby(variants.values)
+        .mean()
+        .reindex(variant_counts_top5.index)
+    )
+
     return {
         "variants": variants,
         "total_cases": total_cases,
         "unique_variants": unique_variants,
         "variant_counts": variant_counts,
         "variant_counts_full": variant_counts_full,
+        "variant_lead_time_top5": variant_lead_time_top5,
         "top1_share": top1_share,
         "top5_share": top5_share,
         "conclusion": conclusion,
@@ -997,6 +1011,55 @@ def build_ai_narrative(
     """
 
 
+def _build_expected_impact(
+    metric: str,
+    current_value: float,
+    target_value: float,
+    unit: str,
+    calculation_method: str,
+    confidence: str,
+    affected_cases: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Req 2 / Sec 8: structured Expected Impact data model, computed once here
+    so app.py/reporting.py only ever display it -- never recalculate it
+    (Sec 19/20 SSOT). `confidence` follows Sec 13's own taxonomy:
+        High   = directly observed (no target/assumption involved)
+        Medium = target is an in-dataset benchmark (another region/role/variant)
+        Low    = target is based on an assumed improvement percentage
+    """
+    improvement_value = current_value - target_value
+    improvement_percent = (improvement_value / current_value * 100) if current_value else 0.0
+    impact: Dict[str, Any] = {
+        "metric": metric,
+        "current_value": round(current_value, 2),
+        "target_value": round(target_value, 2),
+        "improvement_value": round(improvement_value, 2),
+        "improvement_percent": round(improvement_percent, 1),
+        "unit": unit,
+        "calculation_method": calculation_method,
+        "confidence": confidence,
+    }
+    if affected_cases is not None:
+        impact["affected_cases"] = int(affected_cases)
+        impact["total_impact"] = round(improvement_value * affected_cases, 2)
+    impact["display_text"] = _format_impact_text(impact)
+    return impact
+
+
+def _format_impact_text(impact: Dict[str, Any]) -> str:
+    """Req 14: one-line, human-readable rendering of a quantified Expected
+    Impact dict, built once here and reused as-is by both the UI and PDF."""
+    line = (
+        f"Potential {impact['metric']} improvement: {impact['improvement_value']:+.2f} "
+        f"{impact['unit']} ({impact['improvement_percent']:+.1f}%)"
+    )
+    if "total_impact" in impact:
+        line += f", total potential impact ≈ {impact['total_impact']:+.1f} {impact['unit'].split('/')[0]}"
+    line += f". Confidence: {impact['confidence']}."
+    return line
+
+
 def build_improvement_roadmap(
     rework: Dict[str, Any],
     lead_time: Dict[str, Any],
@@ -1018,8 +1081,19 @@ def build_improvement_roadmap(
     never contradict the Executive Summary / Maturity Score it's derived
     alongside (Sec 16).
 
+    Req 2: each initiative also carries a structured `expected_impact` dict
+    (Sec 8) alongside the original qualitative `impact` sentence (Sec 14
+    requires both to be shown), quantifying Current Value / Target Value /
+    Improvement Value / Improvement % / Confidence -- using an in-dataset
+    benchmark wherever one genuinely exists (Medium confidence: non-rework
+    cases' Lead Time, the leading region, the average role FTE, the best
+    Top-5 variant), and an explicitly-labeled assumed percentage only when
+    no such benchmark exists (Low confidence: bottleneck duration, rework
+    rate target).
+
     Returns a list of dicts, each with:
-        priority, icon, phase, area, problem, evidence, action, impact, source
+        priority, icon, phase, area, problem, evidence, action, impact,
+        expected_impact, source
     sorted Critical -> Low (then by evidence severity within a tier),
     capped at 7 initiatives (Sec 13). Only initiatives with real supporting
     evidence are included -- if fewer than 3 qualify, fewer than 3 are
@@ -1039,13 +1113,17 @@ def build_improvement_roadmap(
 
     candidates: List[Dict[str, Any]] = []
 
-    # --- 12.2 Bottleneck Analysis ---
+    # --- 12.2 / 10.1 Bottleneck Analysis ---
     bottlenecks = step_analysis["bottlenecks"]
     top_step = step_analysis["top_step"]
     if not bottlenecks.empty and top_step is not None:
         total_impact = bottlenecks["impact"].sum()
         impact_share = (top_step["impact"] / total_impact) if total_impact else 0
         priority = "Critical" if (impact_share > 0.3 or len(bottlenecks) == 1) else "High"
+        # Sec 10.1: no in-dataset benchmark exists for "how much a specific
+        # bottleneck activity could shrink" -- an assumed 30% reduction is
+        # used, explicitly labeled Low confidence per Sec 13.
+        current_duration = float(top_step["avg_duration"])
         candidates.append({
             "priority": priority,
             "area": "Bottleneck Elimination",
@@ -1064,11 +1142,22 @@ def build_improvement_roadmap(
                 "або усунути зайві погодження."
             ),
             "impact": "Скорочення Lead Time та підвищення пропускної здатності процесу.",
+            "expected_impact": _build_expected_impact(
+                metric="Bottleneck step duration",
+                current_value=current_duration,
+                target_value=current_duration * 0.7,
+                unit="год/кейс",
+                calculation_method=(
+                    "Assumed 30% reduction in step duration (no in-dataset benchmark "
+                    "available for this specific activity)"
+                ),
+                confidence="Low",
+            ),
             "source": "Bottleneck Analysis",
             "severity": float(top_step["impact"]),
         })
 
-    # --- 12.1 Rework Analysis ---
+    # --- 12.1 / 10.2 Rework Analysis ---
     percent_rework = rework["percent_rework"]
     if percent_rework > 15:
         priority = "Critical" if percent_rework > 50 else ("High" if percent_rework > 30 else "Medium")
@@ -1079,6 +1168,25 @@ def build_improvement_roadmap(
         activities_note = (
             f" Основні активності: {', '.join(top_rework_activities)}." if top_rework_activities else ""
         )
+        total_cases_rw = rework.get("total_cases", 0)
+        # Sec 9.2 / 10.2: target rate = 1/3 reduction of current, floored at
+        # 15% (the same "healthy" threshold this roadmap itself uses above
+        # to decide whether Rework is worth flagging at all). This target is
+        # an assumption, not an in-dataset benchmark -> Low confidence.
+        target_rework_rate = max(15.0, percent_rework * (2 / 3))
+        avoided_cases = total_cases_rw * (percent_rework - target_rework_rate) / 100
+        rework_impact = _build_expected_impact(
+            metric="Rework Rate",
+            current_value=percent_rework,
+            target_value=target_rework_rate,
+            unit="%",
+            calculation_method=(
+                "Assumed target: current rate reduced by one-third, floored at a 15% "
+                "healthy-process threshold"
+            ),
+            confidence="Low",
+        )
+        rework_impact["avoided_rework_cases"] = round(avoided_cases, 0)
         candidates.append({
             "priority": priority,
             "area": "Rework Reduction",
@@ -1089,11 +1197,12 @@ def build_improvement_roadmap(
                 "Скорочення Lead Time, зменшення операційного навантаження, "
                 "підвищення стабільності процесу."
             ),
+            "expected_impact": rework_impact,
             "source": "Rework Analysis",
             "severity": percent_rework,
         })
 
-    # --- 12.3 Lead Time Analysis ---
+    # --- 12.3 / 9.1 Lead Time Analysis ---
     mean_lead_rework = lead_time["mean_lead_rework"] or 0
     mean_lead_no_rework = lead_time["mean_lead_no_rework"] or 0
     lead_diff = mean_lead_rework - mean_lead_no_rework
@@ -1111,16 +1220,48 @@ def build_improvement_roadmap(
                 "Time, і пріоритизувати найдовші активності."
             ),
             "impact": "Скорочення наскрізної тривалості процесу.",
+            # Sec 9.1: benchmark = non-rework cases' own observed Lead Time
+            # in this same dataset -> Medium confidence.
+            "expected_impact": _build_expected_impact(
+                metric="Case Lead Time",
+                current_value=mean_lead_rework,
+                target_value=mean_lead_no_rework,
+                unit="год/кейс",
+                calculation_method="Benchmark: average Lead Time of cases without rework in this dataset",
+                confidence="Medium",
+                affected_cases=rework.get("total_rework_cases"),
+            ),
             "source": "Lead Time Analysis",
             "severity": lead_diff,
         })
 
-    # --- 12.4 Variant Analysis ---
+    # --- 12.4 / 10.3 Variant Analysis ---
     unique_variants = variants["unique_variants"]
     total_cases = variants["total_cases"]
     top1_share = variants["top1_share"]
     top5_share = variants["top5_share"]
+    variant_lead_time_top5 = variants.get("variant_lead_time_top5")
     if unique_variants > total_cases * 0.5:
+        expected_impact = None
+        # Sec 10.3: use the best- vs worst-performing Top-5 variant's own
+        # observed Lead Time as the benchmark, when at least 2 variants of
+        # data are available for the comparison -> Medium confidence.
+        if variant_lead_time_top5 is not None and variant_lead_time_top5.notna().sum() >= 2:
+            valid = variant_lead_time_top5.dropna()
+            best_variant_lt = float(valid.min())
+            worst_variant_lt = float(valid.max())
+            if worst_variant_lt > best_variant_lt:
+                expected_impact = _build_expected_impact(
+                    metric="Variant Lead Time",
+                    current_value=worst_variant_lt,
+                    target_value=best_variant_lt,
+                    unit="год/кейс",
+                    calculation_method=(
+                        "Benchmark: best-performing vs least-efficient Top-5 process "
+                        "variant, both observed in this dataset"
+                    ),
+                    confidence="Medium",
+                )
         candidates.append({
             "priority": "High",
             "area": "Process Standardization",
@@ -1137,6 +1278,7 @@ def build_improvement_roadmap(
                 "Зниження складності процесу, підвищення передбачуваності, менша "
                 "операційна варіативність."
             ),
+            "expected_impact": expected_impact,
             "source": "Variant Analysis",
             "severity": (unique_variants / total_cases * 100) if total_cases else 0,
         })
@@ -1148,16 +1290,35 @@ def build_improvement_roadmap(
             "evidence": f"Найпоширеніший сценарій охоплює лише {top1_share:.1f}% кейсів.",
             "action": "Оцінити доцільність формалізації одного або кількох базових сценаріїв процесу.",
             "impact": "Покращена передбачуваність та легша подальша автоматизація.",
+            "expected_impact": None,
             "source": "Variant Analysis",
             "severity": 100 - top1_share,
         })
 
-    # --- 12.5 Role / FTE Analysis ---
+    # --- 12.5 / 10.4 Role / FTE Analysis ---
     if role_analysis_result is not None:
         top_bn_role = role_analysis_result.get("top_bottleneck_role")
         top_fte_role = role_analysis_result.get("top_fte_role")
         focus_role = top_fte_role or top_bn_role
         if focus_role:
+            expected_impact = None
+            # Sec 10.4: benchmark = average FTE across all roles in this
+            # process -> Medium confidence.
+            role_workload = role_analysis_result.get("role_workload")
+            if top_fte_role and role_workload is not None and not role_workload.empty:
+                focus_row = role_workload[role_workload["Role"] == top_fte_role]
+                if not focus_row.empty:
+                    current_fte = float(focus_row.iloc[0]["fte"])
+                    avg_fte = float(role_workload["fte"].mean())
+                    if current_fte > avg_fte:
+                        expected_impact = _build_expected_impact(
+                            metric="Role FTE",
+                            current_value=current_fte,
+                            target_value=avg_fte,
+                            unit="FTE",
+                            calculation_method="Benchmark: average FTE across all roles in this process",
+                            confidence="Medium",
+                        )
             candidates.append({
                 "priority": "Medium",
                 "area": "Resource Allocation",
@@ -1172,11 +1333,12 @@ def build_improvement_roadmap(
                     "завдань, автоматизацію або редизайн процесу."
                 ),
                 "impact": "Покращене використання ресурсів та зменшення залежності від окремих ролей.",
+                "expected_impact": expected_impact,
                 "source": "Role / FTE Analysis",
                 "severity": 1.0,
             })
 
-    # --- 12.6 Regional Analysis ---
+    # --- 12.6 / 10.5 Regional Analysis ---
     if region_analysis_result is not None:
         outsider = region_analysis_result.get("outsider")
         leader = region_analysis_result.get("leader")
@@ -1194,8 +1356,24 @@ def build_improvement_roadmap(
                 if rw_gap_pts > 1:
                     evidence_parts.append(f"Rework Rate на {rw_gap_pts:.0f} в.п. вищий за середній по процесу")
                 action = f"Провести Root Cause Analysis у регіоні {outsider[REGION_COL]}"
+                expected_impact = None
+                # Sec 10.5: benchmark = the leading region's own observed
+                # average Lead Time -> Medium confidence, explicitly labeled
+                # as a benchmark-based (not guaranteed) potential impact.
                 if leader is not None and leader[REGION_COL] != outsider[REGION_COL]:
                     action += f" та порівняти практики виконання з регіоном {leader[REGION_COL]}."
+                    expected_impact = _build_expected_impact(
+                        metric="Regional Lead Time",
+                        current_value=float(outsider["avg_lead_time"]),
+                        target_value=float(leader["avg_lead_time"]),
+                        unit="год/кейс",
+                        calculation_method=(
+                            f"Benchmark-based potential impact: best-performing region "
+                            f"({leader[REGION_COL]})'s own observed average Lead Time"
+                        ),
+                        confidence="Medium",
+                        affected_cases=outsider.get("num_cases"),
+                    )
                 else:
                     action += "."
                 candidates.append({
@@ -1205,12 +1383,27 @@ def build_improvement_roadmap(
                     "evidence": "; ".join(evidence_parts) + ".",
                     "action": action,
                     "impact": "Зменшення розриву в показниках між регіонами та тиражування кращих практик.",
+                    "expected_impact": expected_impact,
                     "source": "Regional Analysis",
                     "severity": max(lt_gap_pct, rw_gap_pts),
                 })
 
         best_practice_region = region_analysis_result.get("best_practice_region")
         if best_practice_region is not None:
+            expected_impact = None
+            if baseline.get("avg_lead_time") and float(best_practice_region["avg_lead_time"]) < baseline["avg_lead_time"]:
+                expected_impact = _build_expected_impact(
+                    metric="Regional Lead Time",
+                    current_value=float(baseline["avg_lead_time"]),
+                    target_value=float(best_practice_region["avg_lead_time"]),
+                    unit="год/кейс",
+                    calculation_method=(
+                        f"Aspirational benchmark: if every region matched "
+                        f"{best_practice_region[REGION_COL]}'s observed average Lead Time "
+                        "(replication feasibility not yet assessed)"
+                    ),
+                    confidence="Low",
+                )
             candidates.append({
                 "priority": "Low",
                 "area": "Best Practice Replication",
@@ -1224,6 +1417,7 @@ def build_improvement_roadmap(
                     f"{best_practice_region[REGION_COL]} для тиражування на інші регіони."
                 ),
                 "impact": "Підвищення продуктивності процесу в регіонах, що відстають.",
+                "expected_impact": expected_impact,
                 "source": "Regional Analysis",
                 "severity": 0.5,
             })
@@ -1243,6 +1437,7 @@ def build_improvement_roadmap(
             "evidence": c["evidence"],
             "action": c["action"],
             "impact": c["impact"],
+            "expected_impact": c.get("expected_impact"),
             "source": c["source"],
         })
     return roadmap

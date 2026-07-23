@@ -1,17 +1,22 @@
 """
 reporting.py
 ------------
-Builds the downloadable PDF "Executive Report" as a fixed-layout document
-(CR-09):
+Builds the downloadable PDF "Executive Report".
 
-    Page 1            Executive Overview + KPI Summary
-    Page 2            Case Duration Distribution
-    Page 3            Heuristics Miner
-    Page 4            Lead Time: Rework vs Non-Rework
-    Page 5            Bubble Chart: Duration vs Rework + Main Bottleneck
-    Page 6 (cond.)    Role Analysis          -- only if the source log had a 'Role' column
-    Page 7 (cond.)    Regional Analysis      -- only if the source log had a 'Region' column
-    Final Page        Executive Summary + Recommendations
+Layout (Req 1, this round)
+-----------------------------
+Content flows sequentially -- Case Duration Distribution, Lead Time, Bubble
+Chart, and the conditional Role/Region Analysis sections are placed one
+after another without being forced onto separate pages, so the report uses
+page space efficiently instead of leaving large empty areas (Rule 1/2).
+Section headings are kept together with their first chart/table via
+ReportLab's `KeepTogether` so a heading is never left orphaned alone at the
+bottom of a page (Rule 3/4). The one exception is Heuristics Miner, which
+gets a dedicated LANDSCAPE page (`NextPageTemplate` switch between the
+'Portrait'/'Landscape' page templates registered on the `BaseDocTemplate`)
+so the process graph can use the maximum available page area regardless of
+how many nodes/edges it has. See `generate_pdf_report`'s docstring for the
+full page sequence.
 
 Reusing figures (CR-01)
 -------------------------
@@ -49,6 +54,13 @@ matplotlib already ships a full copy of DejaVu Sans (regular + bold) inside
 its own installed package data, and matplotlib is already a hard dependency
 of this app, so that bundled font is resolved via `matplotlib.get_data_path()`
 at runtime -- no extra font file needs to live in the repo.
+
+Quantified Expected Impact (Req 2, this round)
+--------------------------------------------------
+Every Improvement Roadmap initiative's `expected_impact` field is a
+structured dict (metric/current/target/improvement/unit/confidence/
+calculation_method) computed once in `analytics.build_improvement_roadmap`
+-- this module only renders it, never recalculates it (Sec 19/20 SSOT).
 """
 
 import logging
@@ -61,16 +73,20 @@ import matplotlib
 import pandas as pd
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
+    BaseDocTemplate,
+    Frame,
     Image,
+    KeepTogether,
+    NextPageTemplate,
     PageBreak,
+    PageTemplate,
     Paragraph,
-    SimpleDocTemplate,
     Spacer,
     Table,
     TableStyle,
@@ -151,6 +167,31 @@ def _image_flowable(png_bytes: Optional[bytes], max_width_cm: float = 16) -> Opt
     aspect = height_px / width_px if width_px else 1
     width = max_width_cm * cm
     height = width * aspect
+    return Image(BytesIO(png_bytes), width=width, height=height)
+
+
+def _image_flowable_fit(png_bytes: Optional[bytes], max_width: float, max_height: float) -> Optional[Image]:
+    """
+    Req 1.2: fit an image into a `max_width` x `max_height` box (points),
+    scaling proportionally so the aspect ratio is always preserved -- fill
+    whichever dimension is the binding constraint, never stretch/distort.
+    Used for the full-page landscape Heuristics Miner graph.
+    """
+    if not png_bytes:
+        return None
+    from PIL import Image as PILImage
+
+    pil_img = PILImage.open(BytesIO(png_bytes))
+    width_px, height_px = pil_img.size
+    if not width_px or not height_px:
+        return None
+    aspect = height_px / width_px
+
+    width = max_width
+    height = width * aspect
+    if height > max_height:
+        height = max_height
+        width = height / aspect
     return Image(BytesIO(png_bytes), width=width, height=height)
 
 
@@ -314,7 +355,7 @@ def _build_kpi_summary(elements: list, styles: dict, kpis: Dict[str, Any]) -> No
 # Page 2: Case Duration Distribution (CR-01.1)
 # ---------------------------------------------------------------------------
 def _build_case_duration_page(elements: list, styles: dict, visualizations, result) -> None:
-    elements.append(Paragraph("Case Duration Distribution (Histogram)", styles["subtitle"]))
+    title = Paragraph("Case Duration Distribution (Histogram)", styles["subtitle"])
 
     fig = _figure_from_result(result, "general_statistics")
     if fig is None:
@@ -325,14 +366,18 @@ def _build_case_duration_page(elements: list, styles: dict, visualizations, resu
 
     img = _image_flowable(_plotly_to_png(fig))
     if img is not None:
-        elements.append(img)
+        elements.append(KeepTogether([title, img]))
     else:
+        elements.append(title)
         _unavailable(elements, styles)
 
 
 # ---------------------------------------------------------------------------
-# Page 3: Heuristics Miner (CR-01.2)
+# Page 3: Heuristics Miner (CR-01.2) -- full-page LANDSCAPE (Req 1.1/1.2)
 # ---------------------------------------------------------------------------
+LANDSCAPE_MARGIN = 30  # points; kept tight per Req 1.1 "avoid unnecessary white margins"
+
+
 def _build_heuristics_page(elements: list, styles: dict, visualizations, result) -> None:
     elements.append(Paragraph("Heuristics Miner (Custom Graphviz)", styles["subtitle"]))
 
@@ -345,7 +390,14 @@ def _build_heuristics_page(elements: list, styles: dict, visualizations, result)
             logger.warning("Heuristics graph rebuild failed: %s", e)
             dot = None
 
-    img = _image_flowable(_graphviz_to_png(dot))
+    landscape_size = landscape(A4)
+    # Available area = full landscape page minus tight margins minus the
+    # title paragraph's approximate height, so the graph uses the maximum
+    # remaining space (Req 1.1/1.2) without overlapping the heading.
+    available_width = landscape_size[0] - 2 * LANDSCAPE_MARGIN
+    available_height = landscape_size[1] - 2 * LANDSCAPE_MARGIN - 40
+
+    img = _image_flowable_fit(_graphviz_to_png(dot), available_width, available_height)
     if img is not None:
         elements.append(img)
     else:
@@ -356,7 +408,7 @@ def _build_heuristics_page(elements: list, styles: dict, visualizations, result)
 # Page 4: Lead Time vs Rework (CR-01.1 -- reuses the matplotlib figure)
 # ---------------------------------------------------------------------------
 def _build_lead_time_page(elements: list, styles: dict, visualizations, result) -> None:
-    elements.append(Paragraph("Lead Time: Rework vs Non-Rework", styles["subtitle"]))
+    title = Paragraph("Lead Time: Rework vs Non-Rework", styles["subtitle"])
 
     lead_time = result.statistics.get("lead_time", {})
     rework = result.statistics.get("rework", {})
@@ -371,8 +423,9 @@ def _build_lead_time_page(elements: list, styles: dict, visualizations, result) 
 
     img = _image_flowable(_plotly_to_png(fig), max_width_cm=13)
     if img is not None:
-        elements.append(img)
+        elements.append(KeepTogether([title, img]))
     else:
+        elements.append(title)
         _unavailable(elements, styles)
 
     elements.append(Spacer(1, 10))
@@ -409,9 +462,7 @@ def _build_lead_time_page(elements: list, styles: dict, visualizations, result) 
 # Page 5: Bubble Chart + bottleneck conclusion (CR-01.3)
 # ---------------------------------------------------------------------------
 def _build_bubble_chart_page(elements: list, styles: dict, visualizations, result) -> None:
-    elements.append(
-        Paragraph("Bubble Chart: Duration per Step vs Rework Count", styles["subtitle"])
-    )
+    title = Paragraph("Bubble Chart: Duration per Step vs Rework Count", styles["subtitle"])
 
     step_analysis = result.statistics.get("step_analysis", {})
 
@@ -427,8 +478,9 @@ def _build_bubble_chart_page(elements: list, styles: dict, visualizations, resul
 
     img = _image_flowable(_plotly_to_png(fig))
     if img is not None:
-        elements.append(img)
+        elements.append(KeepTogether([title, img]))
     else:
+        elements.append(title)
         _unavailable(elements, styles)
 
     elements.append(Spacer(1, 10))
@@ -462,16 +514,15 @@ def _build_role_analysis_page(elements: list, styles: dict, result) -> None:
     if role is None:
         return
 
-    elements.append(Paragraph("Role Analysis", styles["subtitle"]))
-    elements.append(
-        Paragraph(
-            f"Середня кількість FTE на кейс (Average FTE per Case): "
-            f"<b>{role['avg_fte_per_case']:.2f}</b> "
-            "(оцінка потрібного FTE-ресурсу на один кейс, а не кількість фізичних "
-            "співробітників).",
-            styles["base"],
-        )
+    title = Paragraph("Role Analysis", styles["subtitle"])
+    intro = Paragraph(
+        f"Середня кількість FTE на кейс (Average FTE per Case): "
+        f"<b>{role['avg_fte_per_case']:.2f}</b> "
+        "(оцінка потрібного FTE-ресурсу на один кейс, а не кількість фізичних "
+        "співробітників).",
+        styles["base"],
     )
+    elements.append(KeepTogether([title, intro]))
 
     # CR-02 4.4: Role / Cases / Average Hours per Case / FTE table.
     fte_df = role["role_workload"][["Role", "cases_handled", "avg_hours_per_case", "fte"]].sort_values(
@@ -516,8 +567,7 @@ def _build_role_analysis_page(elements: list, styles: dict, result) -> None:
         fig = _figure_from_result(result, "role_analysis", sub_key)
         img = _image_flowable(_plotly_to_png(fig), max_width_cm=15)
         if img is not None:
-            elements.append(Paragraph(caption, styles["chart_caption"]))
-            elements.append(img)
+            elements.append(KeepTogether([Paragraph(caption, styles["chart_caption"]), img]))
             elements.append(Spacer(1, 8))
 
     if role.get("top_bottleneck_role"):
@@ -552,7 +602,7 @@ def _build_region_analysis_page(elements: list, styles: dict, result) -> None:
     if region is None:
         return
 
-    elements.append(Paragraph("Regional Analysis", styles["subtitle"]))
+    title = Paragraph("Regional Analysis", styles["subtitle"])
 
     # Sec. 14.1: Regional KPI Summary table (same kpi_summary dict the UI uses).
     kpi = region["kpi_summary"]
@@ -583,8 +633,7 @@ def _build_region_analysis_page(elements: list, styles: dict, result) -> None:
             ]
         )
     )
-    elements.append(Spacer(1, 4))
-    elements.append(kpi_table)
+    elements.append(KeepTogether([title, Spacer(1, 4), kpi_table]))
     elements.append(Spacer(1, 10))
 
     for caption, sub_key in [
@@ -596,8 +645,7 @@ def _build_region_analysis_page(elements: list, styles: dict, result) -> None:
         fig = _figure_from_result(result, "region_analysis", sub_key)
         img = _image_flowable(_plotly_to_png(fig), max_width_cm=15)
         if img is not None:
-            elements.append(Paragraph(caption, styles["chart_caption"]))
-            elements.append(img)
+            elements.append(KeepTogether([Paragraph(caption, styles["chart_caption"]), img]))
             elements.append(Spacer(1, 8))
 
     if region.get("leader") is not None:
@@ -722,12 +770,23 @@ def _build_improvement_roadmap_section(elements: list, styles: dict, roadmap: li
         for item in roadmap:
             if item["phase"] != phase:
                 continue
+            quantified_line = ""
+            ei = item.get("expected_impact")
+            if ei:
+                quantified_line = (
+                    f"<b>Quantified Expected Impact:</b> Current: {ei['current_value']} {ei['unit']} → "
+                    f"Target: {ei['target_value']} {ei['unit']} "
+                    f"(Δ {ei['improvement_value']:+.2f} {ei['unit']}, {ei['improvement_percent']:+.1f}%)<br/>"
+                    f"<font size=8 color='#6B7280'>{ei['calculation_method']} — "
+                    f"Confidence: {ei['confidence']} (potential, not guaranteed)</font><br/>"
+                )
             card_text = (
                 f"<b>{item['icon']} {item['priority']} — {item['area']}</b><br/><br/>"
                 f"<b>Problem:</b> {item['problem']}<br/>"
                 f"<b>Evidence:</b> {item['evidence']}<br/>"
                 f"<b>Recommended Action:</b> {item['action']}<br/>"
                 f"<b>Expected Impact:</b> {item['impact']}<br/>"
+                f"{quantified_line}"
                 f"<font size=8 color='#6B7280'>Source: {item['source']}</font>"
             )
             card_style = styles[style_by_priority.get(item["priority"], "roadmap_medium")]
@@ -740,20 +799,31 @@ def _build_improvement_roadmap_section(elements: list, styles: dict, roadmap: li
 # ---------------------------------------------------------------------------
 def generate_pdf_report(result) -> BytesIO:
     """
-    Build and return an in-memory PDF buffer for the executive report
-    (CR-09 layout):
+    Build and return an in-memory PDF buffer for the executive report.
 
-        Page 1            Executive Overview + KPI Summary
-        Page 2            Case Duration Distribution
-        Page 3            Heuristics Miner
-        Page 4            Lead Time: Rework vs Non-Rework
-        Page 5            Bubble Chart + Main Bottleneck Conclusion
-        Page 6 (cond.)    Role Analysis      -- only if 'Role' column existed
-        Page 7 (cond.)    Regional Analysis  -- only if 'Region' column existed
-        Page 8            Executive Summary + Recommendations + Maturity Score
-        Final Page        Improvement Roadmap (Req 7 / Sec 18 -- the final
-                           actionable section, reusing the exact same
-                           `result.roadmap` list the Streamlit UI renders)
+    Layout (Req 1): content flows sequentially and continuously -- Case
+    Duration Distribution, Lead Time, Bubble Chart, and the conditional
+    Role/Region Analysis sections are NOT each forced onto their own page
+    (Rule 1/2 of the layout spec); ReportLab's normal frame-flow pagination
+    only starts a new page when the current one is actually full. Section
+    headings are kept together with their first chart/table via
+    `KeepTogether` so a heading is never orphaned alone at the bottom of a
+    page (Rule 3/4).
+
+    The ONE exception is Heuristics Miner (Req 1.1): it gets its own
+    dedicated LANDSCAPE page so the process graph can use the maximum
+    available page area, via a `NextPageTemplate` switch between the
+    'Portrait' and 'Landscape' page templates registered on the doc. The
+    report also breaks to a fresh page before the Executive Summary /
+    Improvement Roadmap, since those represent a distinct final "chapter"
+    of the report rather than another analysis chart.
+
+        Portrait   Executive Overview + KPI Summary
+                   Case Duration Distribution
+        Landscape  Heuristics Miner (full page)
+        Portrait   Lead Time -> Bubble Chart -> Role -> Region (flowing)
+                   Executive Summary + Recommendations + Maturity Score
+                   Improvement Roadmap (with quantified Expected Impact, Req 2)
 
     `result` is an `AnalysisResult` (modules.models.AnalysisResult) -- the
     same object used to render the Streamlit UI. Every chart embedded here
@@ -767,44 +837,61 @@ def generate_pdf_report(result) -> BytesIO:
     styles = _build_styles()
 
     buffer = BytesIO()
-    doc = SimpleDocTemplate(
-        buffer, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=50, bottomMargin=40,
+    portrait_size = A4
+    landscape_size = landscape(A4)
+    margin = 40
+
+    doc = BaseDocTemplate(
+        buffer, pagesize=portrait_size,
+        rightMargin=margin, leftMargin=margin, topMargin=50, bottomMargin=margin,
     )
+    portrait_frame = Frame(
+        margin, margin, portrait_size[0] - 2 * margin, portrait_size[1] - 2 * margin, id="portrait",
+    )
+    landscape_frame = Frame(
+        LANDSCAPE_MARGIN, LANDSCAPE_MARGIN,
+        landscape_size[0] - 2 * LANDSCAPE_MARGIN, landscape_size[1] - 2 * LANDSCAPE_MARGIN,
+        id="landscape",
+    )
+    doc.addPageTemplates([
+        PageTemplate(id="Portrait", frames=[portrait_frame], pagesize=portrait_size),
+        PageTemplate(id="Landscape", frames=[landscape_frame], pagesize=landscape_size),
+    ])
+
     elements: list = []
 
     kpis = result.kpis()
 
-    # ---- Page 1: Executive Overview + KPI Summary ----
+    # ---- Executive Overview + KPI Summary (portrait, default template) ----
     _build_cover_page(elements, styles, kpis)
     _build_kpi_summary(elements, styles, kpis)
-    elements.append(PageBreak())
 
-    # ---- Page 2: Case Duration Distribution ----
+    # ---- Case Duration Distribution (flows right after KPI Summary; no
+    #      forced page break -- Rule 1) ----
     _build_case_duration_page(elements, styles, visualizations, result)
-    elements.append(PageBreak())
 
-    # ---- Page 3: Heuristics Miner ----
+    # ---- Heuristics Miner: dedicated LANDSCAPE page (Req 1.1) ----
+    elements.append(NextPageTemplate("Landscape"))
+    elements.append(PageBreak())
     _build_heuristics_page(elements, styles, visualizations, result)
-    elements.append(PageBreak())
 
-    # ---- Page 4: Lead Time vs Rework ----
+    # ---- Back to portrait for everything else; Lead Time -> Bubble Chart
+    #      -> Role -> Region all flow sequentially with no forced breaks
+    #      between them (Rule 1/2) ----
+    elements.append(NextPageTemplate("Portrait"))
+    elements.append(PageBreak())
     _build_lead_time_page(elements, styles, visualizations, result)
-    elements.append(PageBreak())
-
-    # ---- Page 5: Bubble Chart + bottleneck conclusion ----
     _build_bubble_chart_page(elements, styles, visualizations, result)
 
-    # ---- Page 6 (conditional): Role Analysis ----
     if result.role_analysis is not None:
-        elements.append(PageBreak())
         _build_role_analysis_page(elements, styles, result)
 
-    # ---- Page 7 (conditional): Regional Analysis ----
     if result.region_analysis is not None:
-        elements.append(PageBreak())
         _build_region_analysis_page(elements, styles, result)
 
-    # ---- Final Page: Executive Summary ----
+    # ---- Executive Summary + Improvement Roadmap: a distinct final
+    #      "chapter" of the report, so a fresh page here is a deliberate
+    #      logical section boundary rather than a Rule-1 violation. ----
     elements.append(PageBreak())
     exec_summary = result.executive_summary or {}
     _build_executive_summary_section(
