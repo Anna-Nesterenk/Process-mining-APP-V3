@@ -397,7 +397,22 @@ def _build_heuristics_page(elements: list, styles: dict, visualizations, result)
     available_width = landscape_size[0] - 2 * LANDSCAPE_MARGIN
     available_height = landscape_size[1] - 2 * LANDSCAPE_MARGIN - 40
 
-    img = _image_flowable_fit(_graphviz_to_png(dot), available_width, available_height)
+    # Render at a higher DPI than the default (~96) specifically for this
+    # full-page use -- otherwise the graph is scaled up several times its
+    # native raster size and looks soft/blurry rather than "readable" and
+    # "visually dominant" as required. Uses a copy so the shared Digraph
+    # object (also reused for the Streamlit UI's st.graphviz_chart and SVG
+    # zoom viewer) is never mutated.
+    hires_dot = None
+    if dot is not None:
+        try:
+            hires_dot = dot.copy()
+            hires_dot.attr(dpi="200")
+        except Exception as e:
+            logger.warning("Could not prepare hi-res Graphviz copy, falling back to default DPI: %s", e)
+            hires_dot = dot
+
+    img = _image_flowable_fit(_graphviz_to_png(hires_dot), available_width, available_height)
     if img is not None:
         elements.append(img)
     else:
