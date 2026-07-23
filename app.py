@@ -678,6 +678,18 @@ def render_executive_summary_section(result: AnalysisResult):
                     st.markdown(f"**Evidence:** {item['evidence']}")
                     st.markdown(f"**Recommended Action:** {item['action']}")
                     st.markdown(f"**Expected Impact:** {item['impact']}")
+                    ei = item.get("expected_impact")
+                    if ei:
+                        st.markdown(
+                            f"**Quantified Expected Impact:** Current: {ei['current_value']} "
+                            f"{ei['unit']} → Target: {ei['target_value']} {ei['unit']} "
+                            f"(Δ {ei['improvement_value']:+.2f} {ei['unit']}, "
+                            f"{ei['improvement_percent']:+.1f}%)"
+                        )
+                        st.caption(
+                            f"{ei['calculation_method']} — Confidence: {ei['confidence']} "
+                            "(potential, not guaranteed)"
+                        )
                     st.caption(f"Source: {item['source']}")
 
     pdf_buffer = reporting.generate_pdf_report(result)
