@@ -358,6 +358,17 @@ def region_performance_matrix(
     which would double-count small regions the same as large ones.
     """
     merged = region_lead_time.merge(region_rework, on="Region", how="left")
+
+    # Coerce to plain numeric dtypes and drop rows that can't be plotted.
+    # This guards against NaN (e.g. a region with 0 cases producing a NaN
+    # rework_rate_pct) and against nullable/extension dtypes that some
+    # Plotly versions don't handle the same way as plain float64/int64.
+    for col in ("avg_lead_time", "rework_rate_pct", "num_cases"):
+        if col in merged.columns:
+            merged[col] = pd.to_numeric(merged[col], errors="coerce")
+    merged = merged.dropna(subset=["avg_lead_time", "rework_rate_pct", "num_cases"])
+    merged["num_cases"] = merged["num_cases"].clip(lower=0)
+
     fig = px.scatter(
         merged,
         x="avg_lead_time",
@@ -373,14 +384,39 @@ def region_performance_matrix(
     )
     fig.update_traces(textposition="top center")
 
-    if overall_avg_lead_time is not None:
-        fig.add_vline(
-            x=overall_avg_lead_time, line_dash="dash", line_color="rgba(107,114,128,0.6)", line_width=1.5,
-        )
-    if overall_rework_rate is not None:
-        fig.add_hline(
-            y=overall_rework_rate, line_dash="dash", line_color="rgba(107,114,128,0.6)", line_width=1.5,
-        )
+    # Reference lines are a visual add-on (Req 4). Uses fig.add_shape() with
+    # an explicit line=dict(...) -- the same pattern already proven to work
+    # in step_bubble_chart's mean-reference lines elsewhere in this module
+    # -- rather than add_vline()/add_hline()'s flattened line_dash=/
+    # line_color=/line_width= kwargs, whose exact accepted signature varies
+    # across Plotly versions and was the suspected cause of a TypeError in
+    # production. If anything about the baseline values still trips this
+    # up, the chart itself should still render rather than crash the page.
+    if not merged.empty:
+        x_min, x_max = merged["avg_lead_time"].min(), merged["avg_lead_time"].max()
+        y_min, y_max = merged["rework_rate_pct"].min(), merged["rework_rate_pct"].max()
+        try:
+            if overall_avg_lead_time is not None and pd.notna(overall_avg_lead_time):
+                fig.add_shape(
+                    type="line",
+                    x0=float(overall_avg_lead_time), x1=float(overall_avg_lead_time),
+                    y0=float(y_min), y1=float(y_max),
+                    line=dict(color="rgba(107,114,128,0.6)", width=1.5, dash="dash"),
+                    name="Середній Lead Time",
+                )
+        except Exception:
+            pass
+        try:
+            if overall_rework_rate is not None and pd.notna(overall_rework_rate):
+                fig.add_shape(
+                    type="line",
+                    x0=float(x_min), x1=float(x_max),
+                    y0=float(overall_rework_rate), y1=float(overall_rework_rate),
+                    line=dict(color="rgba(107,114,128,0.6)", width=1.5, dash="dash"),
+                    name="Середній Rework Rate",
+                )
+        except Exception:
+            pass
     return fig
 
 
