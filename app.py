@@ -156,7 +156,6 @@ def main():
         maturity_score=analysis["maturity_score"],
         maturity_score_breakdown=analysis["maturity_score_breakdown"],
         maturity_focus_areas=analysis["maturity_focus_areas"],
-        ai_narrative=analysis["ai_narrative"],
         roadmap=analysis["roadmap"],
         role_analysis=analysis["role_analysis"],
         region_analysis=analysis["region_analysis"],
@@ -349,10 +348,50 @@ def render_heuristics_section(transitions):
     return {"figure": dot, "statistics": transitions}
 
 
+def _render_wrapping_table(df, wrap_column: str) -> None:
+    """
+    Req 2: st.dataframe's grid truncates long cell text with an ellipsis and
+    has no way to force wrapping. Render as a plain HTML table instead, with
+    `white-space: normal; word-break: break-word` on the target column so
+    long values (e.g. full variant scenario paths) wrap onto multiple lines
+    and the row grows to fit -- nothing is ever hidden or truncated.
+    """
+    import html as _html
+
+    header_cells = "".join(
+        f"<th style='text-align:left; padding:8px 10px;'>{_html.escape(str(col))}</th>" for col in df.columns
+    )
+    rows_html = []
+    for _, row in df.iterrows():
+        cells = []
+        for col in df.columns:
+            value = _html.escape(str(row[col]))
+            if col == wrap_column:
+                cells.append(
+                    f"<td style='padding:8px 10px; white-space:normal; "
+                    f"word-break:break-word; line-height:1.5;'>{value}</td>"
+                )
+            else:
+                cells.append(f"<td style='padding:8px 10px; white-space:nowrap;'>{value}</td>")
+        rows_html.append(f"<tr style='border-bottom:1px solid #E5E7EB;'>{''.join(cells)}</tr>")
+
+    html = f"""
+    <table style="width:100%; border-collapse:collapse; font-size:0.9rem;">
+      <thead>
+        <tr style="border-bottom:2px solid #D1D5DB; background:#F3F4F6;">{header_cells}</tr>
+      </thead>
+      <tbody>
+        {''.join(rows_html)}
+      </tbody>
+    </table>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
 def render_variant_analysis_section(variants):
     st.subheader("⚡ Variant analysis (ТОП 5 сценаріїв)")
 
-    st.dataframe(variants["variant_counts"])
+    _render_wrapping_table(variants["variant_counts"], wrap_column="Сценарій процесу")
 
     st.markdown("### 📊 Загальна структура варіантів")
     st.write(f"🔢 Загальна кількість кейсів: **{variants['total_cases']}**")
@@ -394,9 +433,18 @@ def render_role_analysis_section(role_analysis):
     # average number of *distinct roles* per case, not an FTE estimate at
     # all). It now reads the actual FTE-based metric: sum of FTE_role
     # (x_role / 7.5 / 21 * 1.15) across every role involved in the process.
-    st.metric(
-        "Середня кількість FTE на кейс (Average FTE per Case)",
-        f"{role_analysis['avg_fte_per_case']:.2f}",
+    #
+    # Req 3: st.metric doesn't expose label font-size/weight, so this KPI is
+    # rendered as an equivalent custom block instead -- same label above
+    # value layout, but with the label bumped one size level and bolded to
+    # visually emphasize it. Value formatting (.2f) and the underlying
+    # calculation are unchanged.
+    st.markdown(
+        "<div style='font-size:1rem; font-weight:700; color:rgb(49,51,63); "
+        "margin-bottom:2px;'>Середня кількість FTE на кейс (Average FTE per Case)</div>"
+        f"<div style='font-size:2.25rem; font-weight:600; line-height:1.2; "
+        f"color:rgb(49,51,63);'>{role_analysis['avg_fte_per_case']:.2f}</div>",
+        unsafe_allow_html=True,
     )
     st.caption(
         "Оцінка потрібного FTE-ресурсу для обробки середнього навантаження одного "
@@ -481,7 +529,10 @@ def render_region_analysis_section(region_analysis):
 
     st.subheader("Regional Performance Matrix")
     fig_matrix = visualizations.region_performance_matrix(
-        region_analysis["region_lead_time"], region_analysis["region_rework"]
+        region_analysis["region_lead_time"],
+        region_analysis["region_rework"],
+        overall_avg_lead_time=region_analysis["baseline"]["avg_lead_time"],
+        overall_rework_rate=region_analysis["baseline"]["rework_rate_pct"],
     )
     st.plotly_chart(fig_matrix, use_container_width=True)
 
@@ -565,6 +616,11 @@ def render_executive_summary_section(result: AnalysisResult):
 
     # CR-04 6.2/6.3: transparent score breakdown -- what was deducted, why,
     # the actual metric value, and the threshold that triggered it.
+    # (Req 5: the separate "Key Areas to Focus On" list that used to follow
+    # this expander has been removed -- Process Maturity Score itself and
+    # its breakdown are unchanged; priority areas now live exclusively in
+    # the Improvement Roadmap below, driven by actual analytical evidence
+    # rather than duplicated here.)
     with st.expander("🧮 Деталізація розрахунку (Score Breakdown)", expanded=True):
         breakdown_lines = ["**Base Score:** 100"]
         for component in result.maturity_score_breakdown:
@@ -579,14 +635,11 @@ def render_executive_summary_section(result: AnalysisResult):
         # informational style.
         st.success("\n\n".join(breakdown_lines))
 
-    if result.maturity_focus_areas:
-        st.markdown("#### 🎯 Key Areas to Focus On")
-        for i, area in enumerate(result.maturity_focus_areas, 1):
-            st.write(f"{i}. {area}")
-
-    st.header("🧠 AI Process Narrative")
-    # CR-06 8.4: green informational block instead of blue st.info.
-    st.success(result.ai_narrative)
+    # Req 6: the standalone "AI Process Narrative" block has been removed.
+    # Its one non-duplicated sentence (the maturity-level framing) is now
+    # folded into the top of the Executive Summary text above instead
+    # (see analytics.build_executive_summary). Executive Summary,
+    # Recommendations, and Process Maturity Score all remain unchanged.
 
     kpis = result.kpis()
 
@@ -604,9 +657,28 @@ def render_executive_summary_section(result: AnalysisResult):
     if col5 is not None:
         col5.metric("Average FTE per Case", f"{kpis['avg_fte_per_case']:.2f}")
 
+    # Req 7: dynamic, evidence-based, prioritized roadmap. `result.roadmap`
+    # is a list of dicts (priority/icon/phase/area/problem/evidence/action/
+    # impact/source) built once in analytics.build_improvement_roadmap and
+    # reused as-is here and in the PDF (Sec 20 SSOT) -- nothing is
+    # recalculated or re-derived in this UI layer.
     st.header("🚀 Improvement Roadmap")
-    for item in result.roadmap:
-        st.write(item)
+    if not result.roadmap:
+        st.info("Недостатньо аналітичних підстав для формування roadmap на цьому наборі даних.")
+    else:
+        phases_present = list(dict.fromkeys(item["phase"] for item in result.roadmap))
+        for phase in phases_present:
+            st.subheader(phase)
+            for item in result.roadmap:
+                if item["phase"] != phase:
+                    continue
+                with st.container(border=True):
+                    st.markdown(f"##### {item['icon']} {item['priority']} — {item['area']}")
+                    st.markdown(f"**Problem:** {item['problem']}")
+                    st.markdown(f"**Evidence:** {item['evidence']}")
+                    st.markdown(f"**Recommended Action:** {item['action']}")
+                    st.markdown(f"**Expected Impact:** {item['impact']}")
+                    st.caption(f"Source: {item['source']}")
 
     pdf_buffer = reporting.generate_pdf_report(result)
     track_metric("pdf_generated")
