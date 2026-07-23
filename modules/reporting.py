@@ -202,6 +202,26 @@ def _build_styles() -> Dict[str, ParagraphStyle]:
             "Insight", fontName=FONT_REGULAR, fontSize=10, leading=14,
             textColor=colors.HexColor("#1F2937"), spaceAfter=4, leftIndent=10,
         ),
+        "roadmap_critical": ParagraphStyle(
+            "RoadmapCritical", fontName=FONT_REGULAR, fontSize=10, leading=14,
+            textColor=colors.HexColor("#7F1D1D"), spaceAfter=8, backColor=colors.HexColor("#FEF2F2"),
+            borderPadding=8,
+        ),
+        "roadmap_high": ParagraphStyle(
+            "RoadmapHigh", fontName=FONT_REGULAR, fontSize=10, leading=14,
+            textColor=colors.HexColor("#9A3412"), spaceAfter=8, backColor=colors.HexColor("#FFF7ED"),
+            borderPadding=8,
+        ),
+        "roadmap_medium": ParagraphStyle(
+            "RoadmapMedium", fontName=FONT_REGULAR, fontSize=10, leading=14,
+            textColor=colors.HexColor("#854D0E"), spaceAfter=8, backColor=colors.HexColor("#FEFCE8"),
+            borderPadding=8,
+        ),
+        "roadmap_low": ParagraphStyle(
+            "RoadmapLow", fontName=FONT_REGULAR, fontSize=10, leading=14,
+            textColor=colors.HexColor("#14532D"), spaceAfter=8, backColor=colors.HexColor("#F0FDF4"),
+            borderPadding=8,
+        ),
     }
 
 
@@ -661,17 +681,58 @@ def _build_executive_summary_section(
         elements.append(table)
         elements.append(Spacer(1, 10))
 
-    if maturity_focus_areas:
-        elements.append(Paragraph("Key Areas to Focus On", styles["chart_caption"]))
-        for i, area in enumerate(maturity_focus_areas, 1):
-            elements.append(Paragraph(f"{i}. {area}", styles["insight"]))
-        elements.append(Spacer(1, 8))
+    # Req 5: the separate "Key Areas to Focus On" block has been removed
+    # from the report (Process Maturity Score + breakdown above are
+    # unchanged). Priority areas now live exclusively in the Improvement
+    # Roadmap section below.
 
     # CR-03 / item 10: Time Calculation Methodology disclosure.
     elements.append(Paragraph(TIME_METHODOLOGY_TITLE, styles["subtitle"]))
     elements.append(
         Paragraph(TIME_METHODOLOGY_TEXT.replace("\n", "<br/>"), styles["base"])
     )
+
+
+def _build_improvement_roadmap_section(elements: list, styles: dict, roadmap: list) -> None:
+    """
+    Req 7 / Sec 18: the final actionable section of the report. Consumes
+    the exact same `result.roadmap` list (built once in
+    analytics.build_improvement_roadmap) that the Streamlit UI renders --
+    no roadmap logic is duplicated here (Sec 20 SSOT).
+    """
+    elements.append(PageBreak())
+    elements.append(Paragraph("Improvement Roadmap", styles["subtitle"]))
+
+    if not roadmap:
+        elements.append(
+            Paragraph(
+                "Недостатньо аналітичних підстав для формування roadmap на цьому наборі даних.",
+                styles["base"],
+            )
+        )
+        return
+
+    phases_present = list(dict.fromkeys(item["phase"] for item in roadmap))
+    style_by_priority = {
+        "Critical": "roadmap_critical", "High": "roadmap_high",
+        "Medium": "roadmap_medium", "Low": "roadmap_low",
+    }
+    for phase in phases_present:
+        elements.append(Paragraph(phase, styles["chart_caption"]))
+        for item in roadmap:
+            if item["phase"] != phase:
+                continue
+            card_text = (
+                f"<b>{item['icon']} {item['priority']} — {item['area']}</b><br/><br/>"
+                f"<b>Problem:</b> {item['problem']}<br/>"
+                f"<b>Evidence:</b> {item['evidence']}<br/>"
+                f"<b>Recommended Action:</b> {item['action']}<br/>"
+                f"<b>Expected Impact:</b> {item['impact']}<br/>"
+                f"<font size=8 color='#6B7280'>Source: {item['source']}</font>"
+            )
+            card_style = styles[style_by_priority.get(item["priority"], "roadmap_medium")]
+            elements.append(Paragraph(card_text, card_style))
+            elements.append(Spacer(1, 8))
 
 
 # ---------------------------------------------------------------------------
@@ -689,7 +750,10 @@ def generate_pdf_report(result) -> BytesIO:
         Page 5            Bubble Chart + Main Bottleneck Conclusion
         Page 6 (cond.)    Role Analysis      -- only if 'Role' column existed
         Page 7 (cond.)    Regional Analysis  -- only if 'Region' column existed
-        Final Page        Executive Summary + Recommendations
+        Page 8            Executive Summary + Recommendations + Maturity Score
+        Final Page        Improvement Roadmap (Req 7 / Sec 18 -- the final
+                           actionable section, reusing the exact same
+                           `result.roadmap` list the Streamlit UI renders)
 
     `result` is an `AnalysisResult` (modules.models.AnalysisResult) -- the
     same object used to render the Streamlit UI. Every chart embedded here
@@ -752,6 +816,9 @@ def generate_pdf_report(result) -> BytesIO:
         result.maturity_score_breakdown,
         result.maturity_focus_areas,
     )
+
+    # ---- Improvement Roadmap: the final actionable section (Sec 18) ----
+    _build_improvement_roadmap_section(elements, styles, result.roadmap)
 
     doc.build(elements)
     buffer.seek(0)

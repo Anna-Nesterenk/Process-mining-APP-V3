@@ -53,7 +53,7 @@ def lead_time_boxplot(lead_time_per_case: pd.DataFrame):
         points="outliers",
         title="Розподіл Lead Time: кейси з Rework vs без",
     )
-    fig.update_traces(line=dict(width=1.5), marker=dict(size=5, opacity=0.6))
+    fig.update_traces(line=dict(width=1.5, color="black"), marker=dict(size=5, opacity=0.6))
     fig.update_layout(
         height=520,
         showlegend=False,  # the y-axis categories already label each group
@@ -340,7 +340,23 @@ def region_rework_bar(region_rework: pd.DataFrame):
     return fig
 
 
-def region_performance_matrix(region_lead_time: pd.DataFrame, region_rework: pd.DataFrame):
+def region_performance_matrix(
+    region_lead_time: pd.DataFrame,
+    region_rework: pd.DataFrame,
+    overall_avg_lead_time: float = None,
+    overall_rework_rate: float = None,
+):
+    """
+    X = Average Lead Time, Y = Rework Rate, bubble size = Number of Cases.
+
+    Req 4: dashed reference lines at the OVERALL (dataset-wide) average Lead
+    Time / Rework Rate divide the chart into four analytical quadrants
+    (best-performance / critical / high-Lead-Time / high-Rework). These are
+    the same `baseline["avg_lead_time"]` / `baseline["rework_rate_pct"]`
+    values already computed once in `analytics.region_analysis` (Single
+    Source of Truth) -- not a fresh mean-of-the-bubbles calculated here,
+    which would double-count small regions the same as large ones.
+    """
     merged = region_lead_time.merge(region_rework, on="Region", how="left")
     fig = px.scatter(
         merged,
@@ -356,6 +372,15 @@ def region_performance_matrix(region_lead_time: pd.DataFrame, region_rework: pd.
         size_max=40,
     )
     fig.update_traces(textposition="top center")
+
+    if overall_avg_lead_time is not None:
+        fig.add_vline(
+            x=overall_avg_lead_time, line_dash="dash", line_color="rgba(107,114,128,0.6)", line_width=1.5,
+        )
+    if overall_rework_rate is not None:
+        fig.add_hline(
+            y=overall_rework_rate, line_dash="dash", line_color="rgba(107,114,128,0.6)", line_width=1.5,
+        )
     return fig
 
 

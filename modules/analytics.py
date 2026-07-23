@@ -768,11 +768,26 @@ def build_executive_summary(
     unique_variants: int,
     total_cases: int,
     top1_share: float,
+    maturity_score: int,
     role_analysis_result: Optional[Dict[str, Any]] = None,
     region_analysis_result: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, str]:
     lead_diff = mean_lead_rework - mean_lead_no_rework
-    summary_text = ""
+
+    # Req 6: the standalone "AI Process Narrative" block is removed; the one
+    # piece of it not already covered elsewhere in this summary -- the
+    # overall maturity-level framing sentence -- is folded in here instead
+    # of being silently dropped.
+    if maturity_score > 80:
+        maturity_level = "високим рівнем операційної стабільності"
+    elif maturity_score > 50:
+        maturity_level = "помірною структурною зрілістю"
+    else:
+        maturity_level = "операційною нестабільністю"
+    summary_text = (
+        f"Процес характеризується {maturity_level} "
+        f"(Process Maturity Score: {maturity_score}/100).\n\n"
+    )
 
     if percent_rework > 30:
         summary_text += (
@@ -983,16 +998,253 @@ def build_ai_narrative(
 
 
 def build_improvement_roadmap(
-    percent_rework: float, bottlenecks: pd.DataFrame, top_step: Optional[pd.Series]
-) -> List[str]:
+    rework: Dict[str, Any],
+    lead_time: Dict[str, Any],
+    step_analysis: Dict[str, Any],
+    variants: Dict[str, Any],
+    role_analysis_result: Optional[Dict[str, Any]] = None,
+    region_analysis_result: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Req 7 / Sec 9-15: dynamic, evidence-based Improvement Roadmap.
+
+    Every initiative below is built purely from numbers already computed
+    elsewhere (rework / bottleneck / lead-time / variant / role / region
+    analysis) -- nothing here recalculates a metric, it only interprets
+    already-centralized results into prioritized, structured initiatives
+    (Sec 20: Single Source of Truth). Priority thresholds intentionally
+    reuse the exact same cutoffs `compute_maturity_score` already uses
+    (Rework Rate > 30%, unique variants > 50% of cases) so the roadmap can
+    never contradict the Executive Summary / Maturity Score it's derived
+    alongside (Sec 16).
+
+    Returns a list of dicts, each with:
+        priority, icon, phase, area, problem, evidence, action, impact, source
+    sorted Critical -> Low (then by evidence severity within a tier),
+    capped at 7 initiatives (Sec 13). Only initiatives with real supporting
+    evidence are included -- if fewer than 3 qualify, fewer than 3 are
+    returned (Sec 13: "do not generate artificial recommendations").
+    """
+    PRIORITY_ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
+    PRIORITY_ICON = {"Critical": "🚨", "High": "🔴", "Medium": "🟠", "Low": "🟢"}
+    PHASE_BY_AREA = {
+        "Bottleneck Elimination": "Phase 1 — Stabilize",
+        "Rework Reduction": "Phase 1 — Stabilize",
+        "Lead Time Reduction": "Phase 1 — Stabilize",
+        "Process Standardization": "Phase 2 — Standardize",
+        "Regional Performance Optimization": "Phase 2 — Standardize",
+        "Resource Allocation": "Phase 2 — Standardize",
+        "Best Practice Replication": "Phase 3 — Optimize",
+    }
+
+    candidates: List[Dict[str, Any]] = []
+
+    # --- 12.2 Bottleneck Analysis ---
+    bottlenecks = step_analysis["bottlenecks"]
+    top_step = step_analysis["top_step"]
+    if not bottlenecks.empty and top_step is not None:
+        total_impact = bottlenecks["impact"].sum()
+        impact_share = (top_step["impact"] / total_impact) if total_impact else 0
+        priority = "Critical" if (impact_share > 0.3 or len(bottlenecks) == 1) else "High"
+        candidates.append({
+            "priority": priority,
+            "area": "Bottleneck Elimination",
+            "problem": (
+                f"Процес містить суттєві затримки, зосереджені навколо кроку "
+                f"«{top_step[ACTIVITY_COL]}»."
+            ),
+            "evidence": (
+                f"Крок «{top_step[ACTIVITY_COL]}»: середня тривалість "
+                f"{top_step['avg_duration']:.2f} год, середня кількість повторів "
+                f"{top_step['avg_count']:.2f} — обидва показники перевищують середні "
+                "значення по процесу."
+            ),
+            "action": (
+                "Провести Root Cause Analysis кроку та переглянути/спростити процедуру "
+                "або усунути зайві погодження."
+            ),
+            "impact": "Скорочення Lead Time та підвищення пропускної здатності процесу.",
+            "source": "Bottleneck Analysis",
+            "severity": float(top_step["impact"]),
+        })
+
+    # --- 12.1 Rework Analysis ---
+    percent_rework = rework["percent_rework"]
+    if percent_rework > 15:
+        priority = "Critical" if percent_rework > 50 else ("High" if percent_rework > 30 else "Medium")
+        top_rework_activities = (
+            rework["top_rework"]["Activity Name"].tolist()[:2]
+            if not rework["top_rework"].empty else []
+        )
+        activities_note = (
+            f" Основні активності: {', '.join(top_rework_activities)}." if top_rework_activities else ""
+        )
+        candidates.append({
+            "priority": priority,
+            "area": "Rework Reduction",
+            "problem": "Значна частка кейсів містить повторювані активності (rework).",
+            "evidence": f"Rework Rate = {percent_rework}%.{activities_note}",
+            "action": "Визначити першопричини повторень та усунути основні джерела rework.",
+            "impact": (
+                "Скорочення Lead Time, зменшення операційного навантаження, "
+                "підвищення стабільності процесу."
+            ),
+            "source": "Rework Analysis",
+            "severity": percent_rework,
+        })
+
+    # --- 12.3 Lead Time Analysis ---
+    mean_lead_rework = lead_time["mean_lead_rework"] or 0
+    mean_lead_no_rework = lead_time["mean_lead_no_rework"] or 0
+    lead_diff = mean_lead_rework - mean_lead_no_rework
+    if mean_lead_no_rework and lead_diff > 0.3 * mean_lead_no_rework:
+        candidates.append({
+            "priority": "High",
+            "area": "Lead Time Reduction",
+            "problem": "Середній Lead Time суттєво зростає для кейсів з rework.",
+            "evidence": (
+                f"Середній Lead Time: {mean_lead_rework:.2f} год (з rework) проти "
+                f"{mean_lead_no_rework:.2f} год (без rework) — різниця {lead_diff:+.2f} год."
+            ),
+            "action": (
+                "Проаналізувати кроки та waiting time, що найбільше впливають на Lead "
+                "Time, і пріоритизувати найдовші активності."
+            ),
+            "impact": "Скорочення наскрізної тривалості процесу.",
+            "source": "Lead Time Analysis",
+            "severity": lead_diff,
+        })
+
+    # --- 12.4 Variant Analysis ---
+    unique_variants = variants["unique_variants"]
+    total_cases = variants["total_cases"]
+    top1_share = variants["top1_share"]
+    top5_share = variants["top5_share"]
+    if unique_variants > total_cases * 0.5:
+        candidates.append({
+            "priority": "High",
+            "area": "Process Standardization",
+            "problem": "Процес характеризується надмірною варіативністю виконання.",
+            "evidence": (
+                f"{unique_variants} унікальних варіантів на {total_cases} кейсів "
+                f"(ТОП-5 сценаріїв охоплюють {top5_share:.1f}% кейсів)."
+            ),
+            "action": (
+                "Визначити найчастіші варіанти, проаналізувати рідкісні/виняткові "
+                "сценарії та закріпити пріоритетний шлях процесу."
+            ),
+            "impact": (
+                "Зниження складності процесу, підвищення передбачуваності, менша "
+                "операційна варіативність."
+            ),
+            "source": "Variant Analysis",
+            "severity": (unique_variants / total_cases * 100) if total_cases else 0,
+        })
+    elif top1_share < 50:
+        candidates.append({
+            "priority": "Medium",
+            "area": "Process Standardization",
+            "problem": "Процес не має домінуючого стандартного сценарію виконання.",
+            "evidence": f"Найпоширеніший сценарій охоплює лише {top1_share:.1f}% кейсів.",
+            "action": "Оцінити доцільність формалізації одного або кількох базових сценаріїв процесу.",
+            "impact": "Покращена передбачуваність та легша подальша автоматизація.",
+            "source": "Variant Analysis",
+            "severity": 100 - top1_share,
+        })
+
+    # --- 12.5 Role / FTE Analysis ---
+    if role_analysis_result is not None:
+        top_bn_role = role_analysis_result.get("top_bottleneck_role")
+        top_fte_role = role_analysis_result.get("top_fte_role")
+        focus_role = top_fte_role or top_bn_role
+        if focus_role:
+            candidates.append({
+                "priority": "Medium",
+                "area": "Resource Allocation",
+                "problem": f"Значна частка процесного навантаження зосереджена на ролі «{focus_role}».",
+                "evidence": (
+                    f"Роль «{focus_role}» має найвищий оцінений FTE серед усіх ролей процесу."
+                    if top_fte_role else
+                    f"Роль «{focus_role}» найбільше пов'язана з bottleneck-активностями."
+                ),
+                "action": (
+                    "Проаналізувати розподіл навантаження та розглянути перерозподіл "
+                    "завдань, автоматизацію або редизайн процесу."
+                ),
+                "impact": "Покращене використання ресурсів та зменшення залежності від окремих ролей.",
+                "source": "Role / FTE Analysis",
+                "severity": 1.0,
+            })
+
+    # --- 12.6 Regional Analysis ---
+    if region_analysis_result is not None:
+        outsider = region_analysis_result.get("outsider")
+        leader = region_analysis_result.get("leader")
+        baseline = region_analysis_result.get("baseline", {})
+        if outsider is not None and baseline.get("avg_lead_time"):
+            lt_gap_pct = (
+                (outsider["avg_lead_time"] - baseline["avg_lead_time"]) / baseline["avg_lead_time"] * 100
+            )
+            rw_gap_pts = outsider.get("rework_rate_pct", 0) - baseline.get("rework_rate_pct", 0)
+            if lt_gap_pct > 15 or rw_gap_pts > 10:
+                priority = "Critical" if (lt_gap_pct > 40 or rw_gap_pts > 20) else "High"
+                evidence_parts = []
+                if lt_gap_pct > 1:
+                    evidence_parts.append(f"Lead Time на {lt_gap_pct:.0f}% вищий за середній по процесу")
+                if rw_gap_pts > 1:
+                    evidence_parts.append(f"Rework Rate на {rw_gap_pts:.0f} в.п. вищий за середній по процесу")
+                action = f"Провести Root Cause Analysis у регіоні {outsider[REGION_COL]}"
+                if leader is not None and leader[REGION_COL] != outsider[REGION_COL]:
+                    action += f" та порівняти практики виконання з регіоном {leader[REGION_COL]}."
+                else:
+                    action += "."
+                candidates.append({
+                    "priority": priority,
+                    "area": "Regional Performance Optimization",
+                    "problem": f"Регіон {outsider[REGION_COL]} суттєво відстає від загальних показників процесу.",
+                    "evidence": "; ".join(evidence_parts) + ".",
+                    "action": action,
+                    "impact": "Зменшення розриву в показниках між регіонами та тиражування кращих практик.",
+                    "source": "Regional Analysis",
+                    "severity": max(lt_gap_pct, rw_gap_pts),
+                })
+
+        best_practice_region = region_analysis_result.get("best_practice_region")
+        if best_practice_region is not None:
+            candidates.append({
+                "priority": "Low",
+                "area": "Best Practice Replication",
+                "problem": "Найкращі практики провідного регіону поки не задокументовані та не тиражуються.",
+                "evidence": (
+                    f"Регіон {best_practice_region[REGION_COL]} демонструє стабільно високі "
+                    "показники одразу за кількома метриками процесу."
+                ),
+                "action": (
+                    f"Задокументувати та оцінити практики регіону "
+                    f"{best_practice_region[REGION_COL]} для тиражування на інші регіони."
+                ),
+                "impact": "Підвищення продуктивності процесу в регіонах, що відстають.",
+                "source": "Regional Analysis",
+                "severity": 0.5,
+            })
+
+    # Sec 13: Critical -> Low, then by evidence severity within a tier; cap at 7.
+    candidates.sort(key=lambda c: (PRIORITY_ORDER[c["priority"]], -c["severity"]))
+    candidates = candidates[:7]
+
     roadmap = []
-    if percent_rework > 30:
-        roadmap.append("1️⃣ Провести root cause analysis повторюваних кроків")
-    if not bottlenecks.empty:
-        roadmap.append(f"2️⃣ Оптимізувати крок '{top_step[ACTIVITY_COL]}'")
-    roadmap.append("3️⃣ Встановити SLA для критичних переходів")
-    roadmap.append("4️⃣ Стандартизувати ТОП варіанти процесу")
-    roadmap.append("5️⃣ Впровадити регулярний process monitoring dashboard")
+    for c in candidates:
+        roadmap.append({
+            "priority": c["priority"],
+            "icon": PRIORITY_ICON[c["priority"]],
+            "phase": PHASE_BY_AREA.get(c["area"], "Phase 2 — Standardize"),
+            "area": c["area"],
+            "problem": c["problem"],
+            "evidence": c["evidence"],
+            "action": c["action"],
+            "impact": c["impact"],
+            "source": c["source"],
+        })
     return roadmap
 
 
@@ -1028,6 +1280,18 @@ def build_full_analysis(analysis_data: Dict[str, Any]) -> Dict[str, Any]:
     # roles), not the previous avg-distinct-roles-per-case proxy.
     avg_fte_per_case = role_result["avg_fte_per_case"] if role_result is not None else None
 
+    # CR-04: compute_maturity_score now returns a full breakdown dict. This
+    # now has to run BEFORE build_executive_summary, since Req 6 folds the
+    # maturity-level framing sentence (previously the standalone "AI
+    # Process Narrative" block) into the top of the Executive Summary.
+    maturity_score_result = compute_maturity_score(
+        rework["percent_rework"],
+        variants["unique_variants"],
+        variants["total_cases"],
+        step_analysis["bottlenecks"],
+    )
+    maturity_score = maturity_score_result["score"]
+
     executive_summary = build_executive_summary(
         percent_rework=rework["percent_rework"],
         mean_lead_rework=lead_time["mean_lead_rework"],
@@ -1038,28 +1302,23 @@ def build_full_analysis(analysis_data: Dict[str, Any]) -> Dict[str, Any]:
         unique_variants=variants["unique_variants"],
         total_cases=variants["total_cases"],
         top1_share=variants["top1_share"],
+        maturity_score=maturity_score,
         role_analysis_result=role_result,
         region_analysis_result=region_result,
     )
 
-    # CR-04: compute_maturity_score now returns a full breakdown dict.
-    maturity_score_result = compute_maturity_score(
-        rework["percent_rework"],
-        variants["unique_variants"],
-        variants["total_cases"],
-        step_analysis["bottlenecks"],
-    )
-    maturity_score = maturity_score_result["score"]
-
-    ai_narrative = build_ai_narrative(
-        maturity_score,
-        lead_time["lead_time_per_case"]["lead_time"].mean(),
-        rework["percent_rework"],
-        variants["unique_variants"],
-    )
-
+    # Req 7: dynamic, evidence-based roadmap (replaces the old static
+    # 5-bullet list). Req 6: build_ai_narrative() is intentionally no
+    # longer called here -- the function itself is left defined in case a
+    # future feature wants it internally, but it's no longer part of the
+    # displayed analysis result.
     roadmap = build_improvement_roadmap(
-        rework["percent_rework"], step_analysis["bottlenecks"], step_analysis["top_step"]
+        rework=rework,
+        lead_time=lead_time,
+        step_analysis=step_analysis,
+        variants=variants,
+        role_analysis_result=role_result,
+        region_analysis_result=region_result,
     )
 
     return {
@@ -1077,6 +1336,5 @@ def build_full_analysis(analysis_data: Dict[str, Any]) -> Dict[str, Any]:
         "maturity_score": maturity_score,
         "maturity_score_breakdown": maturity_score_result["components"],
         "maturity_focus_areas": maturity_score_result["focus_areas"],
-        "ai_narrative": ai_narrative,
         "roadmap": roadmap,
     }
