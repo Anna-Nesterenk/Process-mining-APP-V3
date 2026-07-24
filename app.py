@@ -157,6 +157,7 @@ def main():
         maturity_score_breakdown=analysis["maturity_score_breakdown"],
         maturity_focus_areas=analysis["maturity_focus_areas"],
         roadmap=analysis["roadmap"],
+        quantified_impact_summary=analysis["quantified_impact_summary"],
         role_analysis=analysis["role_analysis"],
         region_analysis=analysis["region_analysis"],
         avg_fte_per_case=analysis["avg_fte_per_case"],
@@ -663,6 +664,26 @@ def render_executive_summary_section(result: AnalysisResult):
     # reused as-is here and in the PDF (Sec 20 SSOT) -- nothing is
     # recalculated or re-derived in this UI layer.
     st.header("🚀 Improvement Roadmap")
+
+    # Req 1.9: aggregated Total Quantified Expected Impact -- reads the
+    # single centralized summary built once in
+    # analytics.aggregate_quantified_impact (Sec 20 SSOT), never
+    # recalculated here.
+    summary = result.quantified_impact_summary
+    if summary and summary.get("initiatives_count"):
+        with st.container(border=True):
+            st.markdown("##### 📊 TOTAL QUANTIFIED EXPECTED IMPACT *(Potential Gross Impact)*")
+            col_t, col_f = st.columns(2)
+            col_t.metric(
+                "Potential Time Impact",
+                f"{summary['time_hours_per_case']:.2f} год/кейс" if summary["time_initiatives_count"] else "—",
+            )
+            col_f.metric(
+                "Potential FTE Capacity Released",
+                f"{summary['fte']:.2f} FTE" if summary["fte_initiatives_count"] else "—",
+            )
+            st.caption(summary["note"])
+
     if not result.roadmap:
         st.info("Недостатньо аналітичних підстав для формування roadmap на цьому наборі даних.")
     else:
