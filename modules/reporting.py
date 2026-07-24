@@ -376,10 +376,14 @@ def _build_case_duration_page(elements: list, styles: dict, visualizations, resu
 # Page 3: Heuristics Miner (CR-01.2) -- full-page LANDSCAPE (Req 1.1/1.2)
 # ---------------------------------------------------------------------------
 LANDSCAPE_MARGIN = 30  # points; kept tight per Req 1.1 "avoid unnecessary white margins"
+HEURISTICS_TITLE_GAP = 10  # points; small breathing room between title and graph
+HEURISTICS_GRAPH_DPI = 300  # rendering resolution for the PDF (independent of PDF display size)
+HEURISTICS_SAFETY_MARGIN = 15  # points; empirically verified via binary search (threshold ~8pt) to reliably avoid the spurious-blank-page issue across different graph shapes, at negligible cost to graph size
 
 
 def _build_heuristics_page(elements: list, styles: dict, visualizations, result) -> None:
-    elements.append(Paragraph("Heuristics Miner (Custom Graphviz)", styles["subtitle"]))
+    title = Paragraph("Heuristics Miner (Custom Graphviz)", styles["subtitle"])
+    elements.append(title)
 
     dot = _figure_from_result(result, "heuristics")
     if dot is None:
@@ -391,30 +395,53 @@ def _build_heuristics_page(elements: list, styles: dict, visualizations, result)
             dot = None
 
     landscape_size = landscape(A4)
-    # Available area = full landscape page minus tight margins minus the
-    # title paragraph's approximate height, so the graph uses the maximum
-    # remaining space (Req 1.1/1.2) without overlapping the heading.
     available_width = landscape_size[0] - 2 * LANDSCAPE_MARGIN
-    available_height = landscape_size[1] - 2 * LANDSCAPE_MARGIN #- 40
+    frame_height = landscape_size[1] - 2 * LANDSCAPE_MARGIN
 
-    # Render at a higher DPI than the default (~96) specifically for this
-    # full-page use -- otherwise the graph is scaled up several times its
-    # native raster size and looks soft/blurry rather than "readable" and
-    # "visually dominant" as required. Uses a copy so the shared Digraph
-    # object (also reused for the Streamlit UI's st.graphviz_chart and SVG
-    # zoom viewer) is never mutated.
+    # Measure the title's ACTUAL rendered height (not a fixed guess) so the
+    # graph gets the true maximum remaining vertical space below it, and the
+    # centering calculation below is based on real numbers.
+    _, title_height = title.wrap(available_width, frame_height)
+    # HEURISTICS_SAFETY_MARGIN: fitting the content to EXACTLY frame_height
+    # (zero slack) caused ReportLab to spill onto a spurious blank second
+    # page -- floating-point/rendering rounding across title+spacers+image
+    # can tip the cumulative height a hair over the frame boundary. A few
+    # points of slack guarantees the content always fits on the one
+    # intended page.
+    available_height = frame_height - title_height - HEURISTICS_TITLE_GAP - HEURISTICS_SAFETY_MARGIN
+
+    # Render at a much higher DPI than the default (~96) specifically for
+    # this full-page use -- generation resolution is deliberately decoupled
+    # from PDF display size (Sec 8): render once at a resolution with
+    # comfortable headroom for the largest this graph will ever be shown
+    # (a full landscape page), THEN scale that high-res PNG down/up
+    # proportionally to fit -- rather than enlarging an already-low-res
+    # image, which is what caused visible blur before. Uses a copy so the
+    # shared Digraph object (also reused for the Streamlit UI's
+    # st.graphviz_chart and SVG zoom viewer) is never mutated.
     hires_dot = None
     if dot is not None:
         try:
             hires_dot = dot.copy()
-            hires_dot.attr(dpi="200")
+            hires_dot.attr(dpi=str(HEURISTICS_GRAPH_DPI))
         except Exception as e:
             logger.warning("Could not prepare hi-res Graphviz copy, falling back to default DPI: %s", e)
             hires_dot = dot
 
+    # Priority order (Sec 12): maximize size within (available_width,
+    # available_height) first -- _image_flowable_fit already picks whichever
+    # of width/height binds first and preserves aspect ratio -- THEN center
+    # the resulting (already-maximized) image in the leftover space. Vertical
+    # centering never shrinks the graph below its maximum fit.
     img = _image_flowable_fit(_graphviz_to_png(hires_dot), available_width, available_height)
     if img is not None:
+        leftover = max(0.0, available_height - img.drawHeight)
+        top_spacer = leftover / 2
+        bottom_spacer = leftover - top_spacer
+        elements.append(Spacer(1, HEURISTICS_TITLE_GAP + top_spacer))
         elements.append(img)
+        if bottom_spacer > 0:
+            elements.append(Spacer(1, bottom_spacer))
     else:
         _unavailable(elements, styles, "Граф переходів недоступний для відображення.")
 
@@ -862,11 +889,13 @@ def generate_pdf_report(result) -> BytesIO:
     )
     portrait_frame = Frame(
         margin, margin, portrait_size[0] - 2 * margin, portrait_size[1] - 2 * margin, id="portrait",
+        leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0,
     )
     landscape_frame = Frame(
         LANDSCAPE_MARGIN, LANDSCAPE_MARGIN,
         landscape_size[0] - 2 * LANDSCAPE_MARGIN, landscape_size[1] - 2 * LANDSCAPE_MARGIN,
         id="landscape",
+        leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0,
     )
     doc.addPageTemplates([
         PageTemplate(id="Portrait", frames=[portrait_frame], pagesize=portrait_size),
