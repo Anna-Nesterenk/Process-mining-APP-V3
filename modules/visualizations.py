@@ -53,7 +53,7 @@ def lead_time_boxplot(lead_time_per_case: pd.DataFrame):
         points="outliers",
         title="Розподіл Lead Time: кейси з Rework vs без",
     )
-    fig.update_traces(line=dict(width=1.5), marker=dict(size=5, opacity=0.6))
+    fig.update_traces(line=dict(width=1.5, color="black"), marker=dict(size=5, opacity=0.6))
     fig.update_layout(
         height=520,
         showlegend=False,  # the y-axis categories already label each group
@@ -132,7 +132,7 @@ def step_bubble_chart(analysis_df: pd.DataFrame, x_mean: float, y_mean: float):
 def heuristics_graph(edges: pd.DataFrame, bottleneck_text: str) -> Digraph:
     dot = Digraph(
         engine="dot",
-        graph_attr={"rankdir": "LR"},
+        graph_attr={"rankdir": "LR", "nodesep": "0.6"},
         node_attr={"shape": "box", "style": "rounded,filled", "fillcolor": "#F9F9F9"},
     )
 

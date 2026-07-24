@@ -243,6 +243,18 @@ def _build_styles() -> Dict[str, ParagraphStyle]:
             "Insight", fontName=FONT_REGULAR, fontSize=10, leading=14,
             textColor=colors.HexColor("#1F2937"), spaceAfter=4, leftIndent=10,
         ),
+        "table_cell": ParagraphStyle(
+            "TableCell", fontName=FONT_REGULAR, fontSize=9, leading=12,
+            textColor=colors.black,
+        ),
+        "table_cell_bold": ParagraphStyle(
+            "TableCellBold", fontName=FONT_BOLD, fontSize=9, leading=12,
+            textColor=colors.black,
+        ),
+        "table_header": ParagraphStyle(
+            "TableHeader", fontName=FONT_BOLD, fontSize=9.5, leading=12,
+            textColor=colors.white,
+        ),
         "roadmap_critical": ParagraphStyle(
             "RoadmapCritical", fontName=FONT_REGULAR, fontSize=10, leading=14,
             textColor=colors.HexColor("#7F1D1D"), spaceAfter=8, backColor=colors.HexColor("#FEF2F2"),
@@ -268,6 +280,20 @@ def _build_styles() -> Dict[str, ParagraphStyle]:
 
 def _unavailable(elements: list, styles: dict, label: str = "Графік недоступний для відображення.") -> None:
     elements.append(Paragraph(label, styles["base"]))
+
+
+def _paragraph_row(cells, styles: dict, header: bool = False) -> list:
+    """
+    Req 3/4: convert a row of plain strings into wrapping Paragraph
+    flowables. ReportLab's Table does NOT auto-wrap plain string cells --
+    it draws them as a single line that can overflow the column -- only
+    Paragraph flowables wrap to the actual column width and let the row
+    grow to fit, which is what both the Regional Analysis table and the
+    Process Maturity Score breakdown table need for their longer text
+    columns (region names + descriptive labels, and penalty explanations).
+    """
+    style = styles["table_header"] if header else styles["table_cell"]
+    return [Paragraph(str(cell), style) for cell in cells]
 
 
 # ---------------------------------------------------------------------------
@@ -377,7 +403,7 @@ def _build_case_duration_page(elements: list, styles: dict, visualizations, resu
 # ---------------------------------------------------------------------------
 LANDSCAPE_MARGIN = 30  # points; kept tight per Req 1.1 "avoid unnecessary white margins"
 HEURISTICS_TITLE_GAP = 10  # points; small breathing room between title and graph
-HEURISTICS_GRAPH_DPI = 300  # rendering resolution for the PDF (independent of PDF display size)
+HEURISTICS_GRAPH_DPI = 350  # rendering resolution for the PDF (independent of PDF display size); bumped from 300 to keep ppi comfortably high now that graphs render taller (Req 2.5)
 HEURISTICS_SAFETY_MARGIN = 15  # points; empirically verified via binary search (threshold ~8pt) to reliably avoid the spurious-blank-page issue across different graph shapes, at negligible cost to graph size
 
 
@@ -648,7 +674,7 @@ def _build_region_analysis_page(elements: list, styles: dict, result) -> None:
 
     # Sec. 14.1: Regional KPI Summary table (same kpi_summary dict the UI uses).
     kpi = region["kpi_summary"]
-    kpi_rows = [
+    kpi_rows_raw = [
         ["Показник", "Значення"],
         ["Кількість регіонів (Number of Regions)", f"{kpi['num_regions']}"],
         ["Найкращий регіон (Best Performing Region)", kpi["best_region"] or "—"],
@@ -656,6 +682,11 @@ def _build_region_analysis_page(elements: list, styles: dict, result) -> None:
         ["Середній Lead Time по процесу (Overall Average Lead Time)", f"{kpi['overall_avg_lead_time']:.2f} год"],
         ["Найвищий Rework Rate (Highest Rework Rate Region)", kpi["highest_rework_region"] or "—"],
         ["Найвища концентрація bottleneck (Highest Bottleneck Concentration)", kpi["highest_bottleneck_region"] or "—"],
+    ]
+    # Req 3: wrapping Paragraph cells instead of plain strings -- several of
+    # these labels are long enough to overflow a plain-string cell.
+    kpi_rows = [_paragraph_row(kpi_rows_raw[0], styles, header=True)] + [
+        _paragraph_row(row, styles) for row in kpi_rows_raw[1:]
     ]
     kpi_table = Table(kpi_rows, colWidths=[10.5 * cm, 5.5 * cm])
     kpi_table.setStyle(
@@ -740,16 +771,22 @@ def _build_executive_summary_section(
     )
 
     if maturity_score_breakdown:
-        rows = [["Component", "Points", "Applied", "Reason"]]
-        rows.append(["Base Score", "100", "—", "Starting score before penalties."])
+        rows_raw = [["Component", "Points", "Applied", "Reason"]]
+        rows_raw.append(["Base Score", "100", "—", "Starting score before penalties."])
         for c in maturity_score_breakdown:
-            rows.append([
+            rows_raw.append([
                 c["name"],
                 f"{c['points']:+d}",
                 "Yes" if c["applied"] else "No",
                 c["reason"],
             ])
-        table = Table(rows, colWidths=[4 * cm, 1.8 * cm, 1.7 * cm, 8.5 * cm])
+        # Req 4: wrapping Paragraph cells instead of plain strings -- the
+        # "Reason" column holds full explanatory sentences that would
+        # otherwise overflow a plain-string cell.
+        rows = [_paragraph_row(rows_raw[0], styles, header=True)] + [
+            _paragraph_row(row, styles) for row in rows_raw[1:]
+        ]
+        table = Table(rows, colWidths=[3.7 * cm, 1.8 * cm, 2.3 * cm, 8.5 * cm])
         table.setStyle(
             TableStyle(
                 [
@@ -783,7 +820,9 @@ def _build_executive_summary_section(
     )
 
 
-def _build_improvement_roadmap_section(elements: list, styles: dict, roadmap: list) -> None:
+def _build_improvement_roadmap_section(
+    elements: list, styles: dict, roadmap: list, quantified_impact_summary: dict = None,
+) -> None:
     """
     Req 7 / Sec 18: the final actionable section of the report. Consumes
     the exact same `result.roadmap` list (built once in
@@ -792,6 +831,23 @@ def _build_improvement_roadmap_section(elements: list, styles: dict, roadmap: li
     """
     elements.append(PageBreak())
     elements.append(Paragraph("Improvement Roadmap", styles["subtitle"]))
+
+    # Req 1.10: aggregated Total Quantified Expected Impact, same
+    # `quantified_impact_summary` dict the UI reads (Sec 20 SSOT).
+    if quantified_impact_summary and quantified_impact_summary.get("initiatives_count"):
+        s = quantified_impact_summary
+        time_str = (
+            f"{s['time_hours_per_case']:.2f} год/кейс" if s["time_initiatives_count"] else "—"
+        )
+        fte_str = f"{s['fte']:.2f} FTE" if s["fte_initiatives_count"] else "—"
+        summary_text = (
+            "<b>TOTAL QUANTIFIED EXPECTED IMPACT (Potential Gross Impact)</b><br/><br/>"
+            f"<b>Potential Time Impact:</b> {time_str}<br/>"
+            f"<b>Potential FTE Capacity Released:</b> {fte_str}<br/><br/>"
+            f"<font size=8>{s['note']}</font>"
+        )
+        elements.append(Paragraph(summary_text, styles["roadmap_medium"]))
+        elements.append(Spacer(1, 10))
 
     if not roadmap:
         elements.append(
@@ -949,7 +1005,7 @@ def generate_pdf_report(result) -> BytesIO:
     )
 
     # ---- Improvement Roadmap: the final actionable section (Sec 18) ----
-    _build_improvement_roadmap_section(elements, styles, result.roadmap)
+    _build_improvement_roadmap_section(elements, styles, result.roadmap, result.quantified_impact_summary)
 
     doc.build(elements)
     buffer.seek(0)

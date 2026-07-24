@@ -1443,6 +1443,68 @@ def build_improvement_roadmap(
     return roadmap
 
 
+def aggregate_quantified_impact(roadmap: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Req 1 (Sec 1.1-1.10): aggregate the structured `expected_impact` values
+    already attached to each roadmap initiative into a single Total
+    Quantified Expected Impact summary. Reads only the already-computed
+    structured fields (`unit`, `improvement_value`) -- never parses numbers
+    out of the free-text `problem`/`evidence`/`action` strings (Sec 1.4).
+
+    Sec 1.3: time and FTE are fundamentally different units and are
+    aggregated independently -- they are never added together.
+
+    Sec 1.6 (double-counting): different initiatives can plausibly affect
+    the SAME underlying process time -- e.g. a bottleneck-duration
+    initiative and a rework-driven Lead-Time initiative may both be
+    "recovering" overlapping minutes from the same cases. There is no
+    reliable way, from the data available at this layer, to prove the
+    improvements are additive rather than overlapping, so the sum is
+    always reported as `aggregation_type = "gross_potential"` -- an
+    upper-bound estimate of what COULD be achieved if every initiative
+    were fully realized with zero overlap, not a guaranteed cumulative
+    benefit. This matches Sec 1.6's explicit fallback: "If reliable
+    non-overlapping aggregation cannot be established, the system must
+    clearly label the result as Potential Gross Impact."
+    """
+    time_values: List[float] = []
+    time_sources: List[str] = []
+    fte_values: List[float] = []
+    fte_sources: List[str] = []
+
+    for item in roadmap:
+        ei = item.get("expected_impact")
+        if not ei:
+            continue
+        unit = ei.get("unit")
+        improvement = ei.get("improvement_value")
+        if improvement is None:
+            continue
+        if unit == "год/кейс":
+            time_values.append(improvement)
+            time_sources.append(item["area"])
+        elif unit == "FTE":
+            fte_values.append(improvement)
+            fte_sources.append(item["area"])
+
+    return {
+        "time_hours_per_case": round(sum(time_values), 2) if time_values else 0.0,
+        "time_initiatives_count": len(time_values),
+        "time_sources": time_sources,
+        "fte": round(sum(fte_values), 2) if fte_values else 0.0,
+        "fte_initiatives_count": len(fte_values),
+        "fte_sources": fte_sources,
+        "aggregation_type": "gross_potential",
+        "initiatives_count": len(roadmap),
+        "note": (
+            "Aggregated values represent potential gross impact and may include "
+            "overlapping improvement opportunities across initiatives. They "
+            "should not be interpreted as guaranteed, purely additive cumulative "
+            "benefits."
+        ),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Orchestration (FR-9): run every analysis exactly once from the centralized
 # case_times / activity_statistics tables and hand back one dict that
@@ -1516,6 +1578,11 @@ def build_full_analysis(analysis_data: Dict[str, Any]) -> Dict[str, Any]:
         region_analysis_result=region_result,
     )
 
+    # Req 1 / Sec 1.8: aggregated Total Quantified Expected Impact, computed
+    # once here from the roadmap's own structured expected_impact fields, so
+    # the UI and PDF never each derive their own total.
+    quantified_impact_summary = aggregate_quantified_impact(roadmap)
+
     return {
         "general": general,
         "start_end": start_end,
@@ -1532,4 +1599,5 @@ def build_full_analysis(analysis_data: Dict[str, Any]) -> Dict[str, Any]:
         "maturity_score_breakdown": maturity_score_result["components"],
         "maturity_focus_areas": maturity_score_result["focus_areas"],
         "roadmap": roadmap,
+        "quantified_impact_summary": quantified_impact_summary,
     }

@@ -45,6 +45,7 @@ class AnalysisResult:
     maturity_focus_areas: list = field(default_factory=list)
     ai_narrative: str = ""
     roadmap: list = field(default_factory=list)
+    quantified_impact_summary: Dict[str, Any] = field(default_factory=dict)
 
     # CR-08: Optional -- None whenever the source event log doesn't contain
     # a 'Role' / 'Region' column (CR-05 / CR-06 visibility conditions).
