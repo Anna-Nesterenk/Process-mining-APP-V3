@@ -395,7 +395,7 @@ def _build_heuristics_page(elements: list, styles: dict, visualizations, result)
     # title paragraph's approximate height, so the graph uses the maximum
     # remaining space (Req 1.1/1.2) without overlapping the heading.
     available_width = landscape_size[0] - 2 * LANDSCAPE_MARGIN
-    available_height = landscape_size[1] - 2 * LANDSCAPE_MARGIN - 40
+    available_height = landscape_size[1] - 2 * LANDSCAPE_MARGIN #- 40
 
     # Render at a higher DPI than the default (~96) specifically for this
     # full-page use -- otherwise the graph is scaled up several times its
