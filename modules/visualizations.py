@@ -53,7 +53,7 @@ def lead_time_boxplot(lead_time_per_case: pd.DataFrame):
         points="outliers",
         title="Розподіл Lead Time: кейси з Rework vs без",
     )
-    fig.update_traces(line=dict(width=1.5, color="black"), marker=dict(size=5, opacity=0.6))
+    fig.update_traces(line=dict(width=1.5, color="pink"), marker=dict(size=5, opacity=0.6))
     fig.update_layout(
         height=520,
         showlegend=False,  # the y-axis categories already label each group
